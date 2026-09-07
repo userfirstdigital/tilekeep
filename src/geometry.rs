@@ -92,6 +92,23 @@ pub fn longest_axis(rect: Rect) -> SplitAxis {
     }
 }
 
+/// Empty spaces offer a full center, edge halves and corner quarters.
+pub fn empty_splits(rect: Rect, p: Point) -> Vec<(SplitAxis, bool)> {
+    if rect.w <= 0 || rect.h <= 0 {
+        return Vec::new();
+    }
+    let x = (p.x - rect.x) as f64 / rect.w as f64;
+    let y = (p.y - rect.y) as f64 / rect.h as f64;
+    let mut splits = Vec::new();
+    if !(0.25..=0.75).contains(&x) {
+        splits.push((SplitAxis::X, x < 0.5));
+    }
+    if !(0.25..=0.75).contains(&y) {
+        splits.push((SplitAxis::Y, y < 0.5));
+    }
+    splits
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
     Left,

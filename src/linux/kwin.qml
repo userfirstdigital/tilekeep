@@ -25,6 +25,8 @@ Item {
     property var windowConnections: new Map()
     property var previewOwner: null
     property var previewGeometry: null
+    property var previewArea: null
+    property string previewZone: "center"
     property int sequence: 1
     property var pendingSnapshot: null
 
@@ -183,14 +185,43 @@ Item {
         if (!tileable(w) || slotOf(w) || floating.has(w)) return false;
         const m=monitorForOutput(w.output); if (!m) return false;
         const id=identity(w); identities.set(w,id);
+        // Visually free slots can still contain minimized/off-desktop windows.
+        // Prefer usable vacancies before reopening collapsed placeholders or
+        // splitting an occupied slot, even when focus points at a small stack.
+        const added=leaf();added.windows=[w];const min=minimumSize(added);
+        const candidates=[];
+        for(const monitor of [m,...monitors.filter(other=>other!==m)]) {
+            const bounds=rects(monitor);
+            for(const slot of leaves(monitor.root)) {
+                const r=bounds.get(slot);
+                if(vacantHere(slot)&&r.width>=Math.max(1,min.width)&&r.height>=Math.max(1,min.height))
+                    candidates.push({monitor,slot,r});
+            }
+        }
+        candidates.sort((a,b)=>Number(b.monitor===m)-Number(a.monitor===m)||
+            Number(b.slot.remembered===id)-Number(a.slot.remembered===id)||
+            (b.slot.vacated||0)-(a.slot.vacated||0)||area(b.r)-area(a.r));
+        if(candidates.length){assign(candidates[0].slot,w);return true;}
         const ls=leaves(m.root), remembered=ls.filter(s=>!s.windows.length&&s.remembered===id).sort((a,b)=>(b.vacated||0)-(a.vacated||0))[0];
         if (remembered) assign(remembered,w);
         else {
             const empty=ls.filter(s=>!s.windows.length).sort((a,b)=>(b.vacated||0)-(a.vacated||0))[0];
             if (empty) assign(empty,w);
             else {
-                const map=rects(m), focus=focused&&slotOf(focused), target=focus&&focus[0]===m?focus[1]:ls.sort((a,b)=>area(map.get(b))-area(map.get(a)))[0];
-                const r=map.get(target); splitSlot(m,target,r.width>=r.height?"x":"y",false,w);
+                const map=rects(m),focus=focused&&slotOf(focused);
+                const ordered=ls.slice().sort((a,b)=>Number(focus&&focus[0]===m&&b===focus[1])-Number(focus&&focus[0]===m&&a===focus[1])||area(map.get(b))-area(map.get(a)));
+                let chosen=null;
+                for(const target of ordered) {
+                    const r=map.get(target),old=minimumSize(target),axes=r.width>=r.height?["x","y"]:["y","x"];
+                    for(const axis of axes) {
+                        const fits=axis==="x"?old.width+min.width+gap<=r.width&&Math.max(old.height,min.height)<=r.height:
+                            Math.max(old.width,min.width)<=r.width&&old.height+min.height+gap<=r.height;
+                        if(fits){chosen={target,axis};break;}
+                    }
+                    if(chosen)break;
+                }
+                const target=chosen?chosen.target:ls.slice().sort((a,b)=>area(map.get(b))-area(map.get(a)))[0];
+                const r=map.get(target);splitSlot(m,target,chosen?chosen.axis:r.width>=r.height?"x":"y",false,w);
             }
         }
         console.log("Tilekeep: tracking",id,String(w.caption));
@@ -215,7 +246,7 @@ Item {
         for (const m of monitors) {
             const map=rects(m);
             for (const s of leaves(m.root)) {
-                const stack=s.windows.length>1;
+                const stack=s.windows.filter(w=>visibleHere(w)).length>1;
                 for(let i=0;i<s.windows.length;i++) out.push({window:s.windows[i],rect:map.get(s),output:m.output,active:stack&&i===s.active});
             }
         }
@@ -260,7 +291,9 @@ Item {
         const p=currentPlacement;if(!p)return;
         placementDeadline.stop();
         expectedGeometry.delete(p.window);
-        if(p.active&&tileable(p.window)&&visibleHere(p.window)) { Workspace.raiseWindow(p.window);Workspace.activeWindow=p.window; }
+        // Layout reconciliation must not activate an unrelated stack or steal
+        // focus from a floating window/dialog. Explicit stack cycling activates.
+        if(p.active&&focused===p.window&&tileable(p.window)&&visibleHere(p.window))Workspace.raiseWindow(p.window);
         currentPlacement=null;
         placementSpacing.restart();
     }
@@ -308,9 +341,68 @@ Item {
         return Math.abs(x-.5)>=Math.abs(y-.5)?(x<.5?"left":"right"):(y<.5?"top":"bottom");
     }
     function vacantHere(slot) { return !slot.windows.some(w=>visibleHere(w)); }
+    function emptyZone(r,p) {
+        const x=(p.x-r.x)/r.width,y=(p.y-r.y)/r.height;
+        const horizontal=x<.25?"left":x>.75?"right":"";
+        const vertical=y<.25?"top":y>.75?"bottom":"";
+        return vertical&&horizontal?vertical+"-"+horizontal:horizontal||vertical||"center";
+    }
+    function emptyPart(r,z) {
+        let result=Object.assign({},r);
+        if(z.includes("left")||z.includes("right")) {
+            const first=Math.round(Math.max(0,r.width-gap)/2);
+            result.width=z.includes("left")?first:Math.max(0,r.width-gap)-first;
+            if(z.includes("right"))result.x+=first+gap;
+        }
+        if(z.includes("top")||z.includes("bottom")) {
+            const first=Math.round(Math.max(0,r.height-gap)/2);
+            result.height=z.includes("top")?first:Math.max(0,r.height-gap)-first;
+            if(z.includes("bottom"))result.y+=first+gap;
+        }
+        return result;
+    }
+    function fittingEmptyZone(w,r,z) {
+        const added=leaf();added.windows=[w];const min=minimumSize(added);
+        const fits=part=>part.width>=Math.max(1,min.width)&&part.height>=Math.max(1,min.height);
+        if(!fits(r))return "unavailable";
+        if(fits(emptyPart(r,z)))return z;
+        // A quarter smaller than the app's minimum becomes a fitting half.
+        if(z.includes("-"))for(const half of [z.split("-")[1],z.split("-")[0]])if(fits(emptyPart(r,half)))return half;
+        return "center";
+    }
+    function partitionEmpty(m,target,z) {
+        let selected=target;
+        for(const axis of ["x","y"]) {
+            const first=axis==="x"?z.includes("left"):z.includes("top");
+            const second=axis==="x"?z.includes("right"):z.includes("bottom");
+            if(!first&&!second)continue;
+            const spare=leaf(),split={kind:"split",axis,ratio:.5,first:null,second:null,parent:null};
+            replaceNode(selected,split,m);
+            split.first=first?selected:spare;split.second=first?spare:selected;
+            selected.parent=split;spare.parent=split;
+        }
+        return selected;
+    }
     function dropPreview(w,hit,z) {
         const target=hit[1],r=hit[2],source=slotOf(w);
-        if(z==="center"||vacantHere(target)||(source&&source[1]===target&&target.windows.length<2))return r;
+        if(vacantHere(target)) {
+            // Simulate the tree edit as well as the fraction: vacating a tiny
+            // source may collapse its old placeholder and change final bounds.
+            function copy(n,parent) {
+                const c=Object.assign({},n,{parent});
+                if(n.kind==="leaf")c.windows=n.windows.slice();
+                else {c.first=copy(n.first,c);c.second=copy(n.second,c);}return c;
+            }
+            const roots=monitors.map(m=>m.root),oldSequence=sequence;
+            try {
+                for(const m of monitors)m.root=copy(m.root,null);
+                const p={x:r.x+r.width*(z.includes("left")?.1:z.includes("right")?.9:.5),
+                    y:r.y+r.height*(z.includes("top")?.1:z.includes("bottom")?.9:.5)};
+                if(!drop(w,p,false))return r;
+                const found=slotOf(w);return rects(found[0]).get(found[1]);
+            }finally {for(let i=0;i<monitors.length;i++)monitors[i].root=roots[i];sequence=oldSequence;}
+        }
+        if(z==="center"||(source&&source[1]===target&&target.windows.length<2))return r;
         const axis=z==="left"||z==="right"?"x":"y",newFirst=z==="left"||z==="top";
         const added=leaf();added.windows=[w];
         const a=minimumSize(target,w),b=minimumSize(added);
@@ -326,10 +418,18 @@ Item {
         if(floating.has(w))return false;
         const hit=slotAt(p); if(!hit)return false;
         const [m,target,r]=hit,source=slotOf(w);
-        // A minimized/off-desktop window is not an occupied drop target. Use
-        // the whole slot even at its edges, swapping its remembered occupants
-        // back to the source so restoring them does not cover the dropped one.
-        const z=vacantHere(target)?"center":zone(r,p);
+        if(vacantHere(target)) {
+            const z=fittingEmptyZone(w,r,emptyZone(r,p));
+            if(z==="unavailable")return false;
+            // Retain hidden occupants in the source when possible. Never close
+            // them or make them visible while allocating the empty target.
+            const hidden=target.windows.slice(),active=target.active;
+            detach(w);target.windows=[];target.active=0;
+            if(source&&source[1]!==target)for(const hiddenWindow of hidden)assign(source[1],hiddenWindow);
+            else {target.windows=hidden;target.active=active;}
+            assign(partitionEmpty(m,target,z),w);return true;
+        }
+        const z=zone(r,p);
         if(source&&source[1]===target) {
             if(z==="center"||target.windows.length<2)return false;
             detach(w); splitSlot(m,target,z==="left"||z==="right"?"x":"y",z==="left"||z==="top",w); return true;
@@ -378,22 +478,26 @@ Item {
     function cycle(delta) {
         if(paused)return;
         const f=focused&&slotOf(focused);if(!f||f[1].windows.length<2)return;
-        const s=f[1];s.active=(s.active+delta+s.windows.length)%s.windows.length;focused=s.windows[s.active];apply();
+        const s=f[1],visible=s.windows.filter(w=>visibleHere(w));if(visible.length<2)return;
+        const next=(visible.indexOf(focused)+delta+visible.length)%visible.length;
+        focused=visible[next];s.active=s.windows.indexOf(focused);apply();Workspace.raiseWindow(focused);Workspace.activeWindow=focused;
     }
-    function showPreview(w,r) {
+    function showPreview(w,r,full,z) {
         if(!enabled||paused||dryRun||!tileable(w)||floating.has(w))return;
         previewOwner=w;
+        previewArea=full||null;previewZone=z||"center";
+        const surface=full||r;
         const old=previewGeometry;
         if(!old||old.x!==r.x||old.y!==r.y||old.width!==r.width||old.height!==r.height) {
             previewGeometry=rect(r);
-            dragPreview.x=r.x;dragPreview.y=r.y;
-            dragPreview.width=r.width;dragPreview.height=r.height;
         }
+        dragPreview.x=surface.x;dragPreview.y=surface.y;
+        dragPreview.width=surface.width;dragPreview.height=surface.height;
         if(!dragPreview.visible)dragPreview.visible=true;
     }
     function hidePreview(w) {
         if(w&&previewOwner!==w)return;
-        dragPreview.visible=false;previewOwner=null;previewGeometry=null;
+        dragPreview.visible=false;previewOwner=null;previewGeometry=null;previewArea=null;
     }
     function connectWindow(w) {
         if(windowConnections.has(w))return;
@@ -416,8 +520,10 @@ Item {
         handlers.stepped=g=>{
             if(!drag||!drag.moving)return;
             const hit=slotAt(Workspace.cursorPos);if(!hit){hidePreview(w);return;}
-            const r=dropPreview(w,hit,zone(hit[2],Workspace.cursorPos));
-            showPreview(w,r);
+            const empty=vacantHere(hit[1]);
+            const z=empty?fittingEmptyZone(w,hit[2],emptyZone(hit[2],Workspace.cursorPos)):zone(hit[2],Workspace.cursorPos);
+            const r=dropPreview(w,hit,z);
+            showPreview(w,r,empty?hit[2]:null,z);
         };
         handlers.finished=()=>{
             interactiveWindows.delete(w);
@@ -459,6 +565,11 @@ Item {
         if(paused)return;
         const w=Workspace.activeWindow,hit=slotAt(Workspace.cursorPos);if(!tileable(w)||floating.has(w)||!hit||hit[1].windows.includes(w))return;
         detach(w);assign(hit[1],w);focused=w;apply();
+    }
+    function unstack(w) {
+        if(paused||interactiveWindows.size)return false;
+        const found=slotOf(w);if(!found||found[1].windows.length<2)return false;
+        detach(w);appeared(w);apply();return true;
     }
     function stop() {
         enabled=false;placementDeadline.stop();placementSpacing.stop();recoveryTimer.stop();workAreaTimer.stop();hidePreview();
@@ -572,11 +683,28 @@ Item {
             Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
         color: "transparent"
         visible: false
-        KSvg.FrameSvgItem { anchors.fill: parent; imagePath: "widgets/translucentbackground" }
+        Rectangle { anchors.fill: parent; color: root.previewArea?"#183b82f6":"transparent"; border.color: "#aa8ac7ff"; border.width: root.previewArea?2:0; radius: 5 }
+        Rectangle { visible: !!root.previewArea; x: parent.width/2; width: 1; height: parent.height; color: "#778ac7ff" }
+        Rectangle { visible: !!root.previewArea; y: parent.height/2; height: 1; width: parent.width; color: "#778ac7ff" }
+        KSvg.FrameSvgItem {
+            x: root.previewGeometry?root.previewGeometry.x-dragPreview.x:0
+            y: root.previewGeometry?root.previewGeometry.y-dragPreview.y:0
+            width: root.previewGeometry?root.previewGeometry.width:0
+            height: root.previewGeometry?root.previewGeometry.height:0
+            imagePath: "widgets/translucentbackground"
+            Rectangle { anchors.fill: parent; color: root.previewZone==="unavailable"?"#30ff5555":"#304da6ff"; border.color: root.previewZone==="unavailable"?"#ccff8888":"#cc8ac7ff"; border.width: 2; radius: 5 }
+        }
+        Text {
+            visible: !!root.previewArea
+            anchors.horizontalCenter: parent.horizontalCenter; anchors.top: parent.top; anchors.topMargin: 12
+            text: root.previewZone==="unavailable"?"Too small for this app":root.previewZone==="center"?"Full space":root.previewZone.includes("-")?"Quarter space":"Half space"
+            color: "white"; style: Text.Outline; styleColor: "#203040"; font.pixelSize: 16
+        }
     }
 
     ShortcutHandler { name: "TilekeepCompact"; text: "Tilekeep: compact monitor"; sequence: "Meta+Shift+K"; onActivated: { if(root.paused)return;const m=root.monitorForOutput(Workspace.screenAt(Workspace.cursorPos)); if(m){root.compact(m);root.apply();} } }
     ShortcutHandler { name: "TilekeepRetile"; text: "Tilekeep: re-tile windows"; sequence: "Meta+Shift+L"; onActivated: { root.syncMonitors();root.apply(); } }
+    ShortcutHandler { name: "TilekeepUnstack"; text: "Tilekeep: unstack active window"; onActivated: root.unstack(Workspace.activeWindow) }
     ShortcutHandler { name: "TilekeepFloat"; text: "Tilekeep: toggle floating"; sequence: "Meta+Shift+F"; onActivated: { if(root.paused)return;const w=Workspace.activeWindow;if(!w)return;if(root.floating.has(w)){root.floating.delete(w);root.appeared(w);}else{root.detach(w);root.floating.add(w);}root.apply(); } }
     // A fresh action id avoids loading the old saved Meta+Shift+S binding,
     // which conflicts with Spectacle's default screenshot shortcut.

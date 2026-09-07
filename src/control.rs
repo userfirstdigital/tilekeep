@@ -9,6 +9,7 @@ use std::{
 #[derive(Clone, Debug)]
 pub enum Action {
     Pause,
+    Unstack,
     Retile,
     Compact,
     Gap(i32),
@@ -24,6 +25,7 @@ pub enum Action {
 #[derive(Clone, Debug)]
 pub enum Command {
     Pause(bool),
+    Unstack,
     Retile,
     Compact,
     Gap(i32),
@@ -127,6 +129,7 @@ impl Controller {
                 Some(Command::Pause(state.paused))
             }
             Action::Retile => Some(Command::Retile),
+            Action::Unstack => Some(Command::Unstack),
             Action::Compact => Some(Command::Compact),
             Action::Quit => Some(Command::Quit),
             Action::SaveSnapshot => Some(Command::SaveSnapshot),

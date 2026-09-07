@@ -148,6 +148,16 @@ impl Desktop {
         }
     }
 
+    pub fn unstack(&mut self, w: WindowId) -> bool {
+        if !self.is_stacked(w) {
+            return false;
+        }
+        let Some(on) = self.monitor_of(w) else { return false };
+        let identity = self.identities.get(&w).cloned();
+        self.detach(w);
+        self.window_appeared(w, on, identity)
+    }
+
     pub fn monitor_of(&self, w: WindowId) -> Option<MonitorId> {
         self.locate(w).map(|(mi, _)| self.monitors[mi].id)
     }
@@ -340,7 +350,12 @@ impl Desktop {
 
         if self.monitors[tmi].tree.is_empty_slot(target) {
             self.detach(dragged);
-            self.monitors[tmi].tree.assign(target, dragged);
+            let mut selected = target;
+            self.monitors[tmi].tree.assign(selected, dragged);
+            for (axis, first) in crate::geometry::empty_splits(target_rect, at) {
+                self.monitors[tmi].tree.remove_window(dragged);
+                selected = self.monitors[tmi].tree.split_slot(selected, axis, first, dragged);
+            }
             return DropEffect::Moved;
         }
 
@@ -804,14 +819,43 @@ mod tests {
     }
 
     #[test]
-    fn any_drop_on_an_empty_slot_fills_it() {
+    fn center_drop_on_an_empty_slot_fills_it() {
         let mut d = two_up();
         d.window_vanished(B);
-        assert_eq!(d.drop_window(C, Point { x: 990, y: 250 }, false), DropEffect::Moved); // right zone, but empty
+        assert_eq!(d.drop_window(C, Point { x: 750, y: 250 }, false), DropEffect::Moved);
         assert_eq!(rect(&d, C), Rect::new(500, 0, 500, 500));
         assert_eq!(d.drop_window(A, Point { x: 750, y: 250 }, false), DropEffect::Swapped);
         assert_eq!(rect(&d, A), Rect::new(500, 0, 500, 500));
         assert_eq!(rect(&d, C), Rect::new(0, 0, 500, 500));
+    }
+
+    #[test]
+    fn empty_space_halves_and_quarters_match_previews() {
+        for x in [550, 750, 950] {
+            for y in [50, 250, 450] {
+                let mut d = two_up();
+                d.window_vanished(B);
+                let at = Point { x, y };
+                let preview = d.preview_rect(C, at, false).unwrap();
+                assert_eq!(d.drop_window(C, at, false), DropEffect::Moved);
+                assert_eq!(rect(&d, C), preview);
+                assert_eq!(preview.w, if x == 750 { 500 } else { 250 });
+                assert_eq!(preview.h, if y == 250 { 500 } else { 250 });
+                assert_eq!(rect(&d, A), Rect::new(0, 0, 500, 500));
+            }
+        }
+    }
+
+    #[test]
+    fn unstack_uses_a_vacancy_and_keeps_both_windows() {
+        let mut d = two_up();
+        d.drop_window(B, Point { x: 250, y: 250 }, true);
+        assert!(d.is_stacked(A));
+        assert!(d.unstack(B));
+        assert!(!d.is_stacked(A));
+        assert!(!d.is_stacked(B));
+        assert!(d.contains(A) && d.contains(B));
+        assert_eq!(rect(&d, B), Rect::new(500, 0, 500, 500));
     }
 
     #[test]

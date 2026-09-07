@@ -5,6 +5,7 @@ The default development branch is `master`.
 
 Tilekeep has a native tray menu for pause/resume, gap size, retile/compact, saved snapshots,
 login startup, and update status. Settings are saved per user. `wm` remains the development binary name.
+Use **Unstack active window** in the tray to separate a window sharing another window's slot.
 
 Install the built/downloaded executable with `--install`, then run the installed copy. Linux:
 `~/.local/share/tilekeep/bin/tilekeep`; Windows: `%LOCALAPPDATA%\Programs\Tilekeep\tilekeep.exe`.
@@ -92,8 +93,13 @@ Visible, titled, movable and resizable top-level application windows that are no
 panels, popups, or shell surfaces. Fixed-size dialogs are left alone. Minimised or maximised
 windows, and windows on another virtual desktop, keep their slot and are not moved until they come back.
 On Plasma, these inactive slots do not impose minimum-size limits on neighboring windows.
-Dropping anywhere in an empty-looking slot fills the whole slot; any hidden occupants exchange
-slots with the dragged window, remaining hidden until you restore them.
+Empty-space drops use the center for the whole area, edge centers for halves, and corners for
+quarters. The Plasma preview outlines the whole area, shows subdivision guides, and highlights
+the selected portion. A quarter too small for the app falls back to a fitting half or the whole
+area; an area that cannot fit the app is labeled and leaves the layout unchanged on release.
+Hidden occupants remain hidden and are retained in the source slot when possible.
+New Plasma windows use visible free space (including slots held by minimized windows) before
+splitting occupied slots. A cramped focused slot is skipped when another slot can fit a split.
 The default gap is 1 logical pixel. Resizing fully into a vacancy absorbs its leftover strip
 and extra gap, retaining hidden occupants for restoration. Plasma's panel-reserved work area
 is refreshed automatically, including panels on the top, bottom, left, or right edge.
@@ -156,6 +162,12 @@ requires Plasma's Remote Control approval; the test exercises drop/resize logic 
 Live-tested on Plasma/KWin 6.7.4 Wayland at 125% scale: initial tiling, float/unfloat, re-tile,
 center swap, edge split, nested resize, stacking, next/previous stack shortcuts, compaction,
 and layout restoration. X11 and Windows live desktop behavior is not covered by this Plasma test.
+
+The opt-in `node tests/plasma-zones-live.cjs --allow-window-moves --snapshot PATH` uses a saved
+snapshot for restoration, checks all nine empty-space targets, repeated preview updates, focus,
+and actual client geometry. It briefly rearranges windows but never closes them. Add
+`--screenshot /tmp/tilekeep-preview.png` to capture the guide for visual inspection. Screenshots
+may include personal desktop contents: keep them local. Restart Tilekeep after the live tests.
 
 Physical mouse/keyboard testing also covers title-bar swapping, edge drops, border resizing,
 Escape cancellation, floating-window drags, stacking, stack cycling, compaction, and re-tiling.

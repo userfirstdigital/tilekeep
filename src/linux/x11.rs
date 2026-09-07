@@ -604,6 +604,14 @@ impl App {
                     C::Compact => {
                         self.hotkey(Hotkey::Compact);
                     }
+                    C::Unstack => {
+                        if !crate::control::paused() {
+                            if let Some(w) = self.desktop.focused() {
+                                self.desktop.unstack(w);
+                                self.apply();
+                            }
+                        }
+                    }
                     C::SaveSnapshot => match crate::snapshots::save(self.desktop.snapshot(self.snapshot_windows())) {
                         Ok(id) => {
                             if let Some(c) = crate::control::current() {

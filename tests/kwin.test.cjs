@@ -193,7 +193,7 @@ test('invisible windows do not constrain resizing into apparently empty space',(
         assert.equal(c.minimumSize(c.slotOf(hidden)[1]).width,0);
     }
 });
-test('edge drops into minimized slots fill the whole vacancy and preserve hidden occupants',()=>{
+test('edge drops into minimized slots select halves and preserve hidden occupants',()=>{
     for(const z of ['left','right','top','bottom']) {
         const c=backend(),w=window(c),m=c.monitors[0];
         const hidden={minimized:true,minSize:{width:450,height:600}};
@@ -202,21 +202,101 @@ test('edge drops into minimized slots fill the whole vacancy and preserve hidden
         const p={x:r.x+r.width/2,y:r.y+r.height/2};
         if(z==='left')p.x=r.x+1;if(z==='right')p.x=r.x+r.width-1;
         if(z==='top')p.y=r.y+1;if(z==='bottom')p.y=r.y+r.height-1;
-        assert.deepEqual({...c.dropPreview(w,[m,target,r],z)},{...r});
+        const preview=c.dropPreview(w,[m,target,r],z);
+        assert.ok(c.area(preview)<c.area(r));
         assert.equal(c.drop(w,p,false),true);
         assert.equal(c.slotOf(w)[1],target);assert.equal(c.slotOf(hidden)[1],source);
-        assert.equal(hidden.minimized,true);assert.equal(c.leaves(m.root).length,2);
-        assert.deepEqual({...c.rects(m).get(target)},{...r});
+        assert.equal(hidden.minimized,true);assert.equal(c.leaves(m.root).length,3);
+        assert.deepEqual({...c.rects(m).get(target)},{...preview});
         hidden.minimized=false;
         assert.ok(c.rects(m).get(source).width>=450);
     }
 });
-test('an edge drop fills a genuinely empty slot without splitting it',()=>{
+test('a center drop fills a genuinely empty slot without splitting it',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],other={};
     c.splitSlot(m,m.root,'x',false,other);
     const target=c.slotOf(other)[1],r=c.rects(m).get(target);c.detach(other);
-    assert.equal(c.drop(w,{x:r.x+1,y:r.y+1},false),true);
+    assert.equal(c.drop(w,{x:r.x+r.width/2,y:r.y+r.height/2},false),true);
     assert.equal(c.slotOf(w)[1],target);assert.equal(c.leaves(m.root).length,2);
+});
+test('all nine empty-space drop zones match their final placement',()=>{
+    for(const x of [.1,.5,.9])for(const y of [.1,.5,.9]) {
+        const c=backend(),w=window(c),m=c.monitors[0],other={};
+        c.splitSlot(m,m.root,'x',false,other);const target=c.slotOf(other)[1];c.detach(other);
+        const r=c.rects(m).get(target),p={x:r.x+r.width*x,y:r.y+r.height*y};
+        const z=c.emptyZone(r,p),preview=c.dropPreview(w,[m,target,r],z);
+        assert.equal(c.drop(w,p,false),true);
+        assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...preview},z);
+        assert.equal(c.leaves(m.root).length,2+Number(x!==.5)+Number(y!==.5));
+    }
+});
+test('undersized quarters fall back to a fitting half or full area',()=>{
+    const c=backend(),w=window(c);w.minSize={width:400,height:300};
+    const r={x:0,y:0,width:600,height:800};
+    assert.equal(c.fittingEmptyZone(w,r,'top-left'),'top');
+    w.minSize={width:400,height:600};assert.equal(c.fittingEmptyZone(w,r,'top-left'),'center');
+    w.minSize={width:700,height:600};assert.equal(c.fittingEmptyZone(w,r,'top-left'),'unavailable');
+});
+test('an undersized vacancy rejects the drop without rearranging neighbors',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],other={};
+    w.minSize={width:600,height:500};c.splitSlot(m,m.root,'x',false,other);
+    const target=c.slotOf(other)[1];c.detach(other);const r=c.rects(m).get(target),root=m.root;
+    assert.equal(c.drop(w,{x:r.x+r.width/2,y:r.y+r.height/2},false),false);
+    assert.equal(m.root,root);assert.equal(target.windows.length,0);
+});
+test('randomized empty-space previews preserve trees and match committed geometry',()=>{
+    let seed=41;const random=()=>((seed=Math.imul(seed,1664525)+1013904223>>>0)/4294967296);
+    for(let i=0;i<180;i++) {
+        const c=backend(),w=window(c),m=c.monitors[0],other={minimized:i%2===0};
+        m.area={x:-1200,y:20,width:800+Math.floor(random()*3200),height:700+Math.floor(random()*1300)};c.gap=Math.floor(random()*17);
+        c.splitSlot(m,m.root,'x',false,other);m.root.ratio=i%9===0?.05:.15+random()*.65;
+        const target=c.slotOf(other)[1];if(i%2)c.detach(other);
+        const r=c.rects(m).get(target),p={x:r.x+r.width*random(),y:r.y+r.height*random()};
+        const z=c.emptyZone(r,p),tree=m.root,seq=c.sequence,preview=c.dropPreview(w,[m,target,r],z);
+        assert.equal(m.root,tree);assert.equal(c.sequence,seq);
+        assert.equal(c.drop(w,p,false),true);
+        assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...preview},'iteration '+i);
+        const windows=c.allWindows(m.root);assert.equal(new Set(windows).size,windows.length);
+    }
+});
+test('new windows use minimized vacancies without displacing visible neighbors',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true};
+    c.splitSlot(m,m.root,'x',false,hidden);const existing=c.slotOf(w)[1],vacancy=c.slotOf(hidden)[1];
+    const before=c.rects(m).get(existing),newWindow={...w,desktopFileName:'new'};
+    c.focused=w;assert.equal(c.appeared(newWindow),true);
+    assert.equal(c.slotOf(newWindow)[1],vacancy);assert.equal(existing.windows.length,1);
+    assert.deepEqual({...c.rects(m).get(existing)},{...before});assert.equal(hidden.minimized,true);
+});
+test('unstack separates overlapping windows into visible free space',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true};
+    c.splitSlot(m,m.root,'x',false,hidden);
+    const second={...w,desktopFileName:'second'};c.assign(c.slotOf(w)[1],second);
+    assert.equal(c.unstack(second),true);
+    assert.notEqual(c.slotOf(w)[1],c.slotOf(second)[1]);
+    assert.equal(c.slotOf(w)[1].windows.length,1);
+});
+test('a usable vacancy wins over a collapsed remembered slot',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],gone={};
+    c.splitSlot(m,m.root,'x',false,gone);const remembered=c.slotOf(gone)[1];c.detach(gone);
+    remembered.remembered='new';m.root.ratio=.95;
+    const open=c.leaf(),old=m.root;m.root={kind:'split',axis:'y',ratio:.5,first:old,second:open,parent:null};old.parent=m.root;open.parent=m.root;
+    const incoming={...w,desktopFileName:'new'};c.appeared(incoming);
+    assert.equal(c.slotOf(incoming)[1],open);assert.equal(remembered.windows.length,0);
+});
+test('new windows split another fitting slot instead of stacking on a cramped focus',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],other={minSize:{width:50,height:50}};
+    w.minSize={width:200,height:600};c.splitSlot(m,m.root,'x',false,other);m.root.ratio=.3;
+    const focusSlot=c.slotOf(w)[1];c.focused=w;
+    const incoming={...w,desktopFileName:'new',minSize:{width:200,height:500}};c.appeared(incoming);
+    assert.equal(focusSlot.windows.length,1);assert.notEqual(c.slotOf(incoming)[1],c.slotOf(other)[1]);
+});
+test('empty-space guides keep full bounds while the selected quarter changes',()=>{
+    const c=backend(),w=window(c),full={x:10,y:20,width:800,height:600};
+    c.showPreview(w,c.emptyPart(full,'top-left'),full,'top-left');
+    assert.equal(c.dragPreview.width,800);assert.equal(c.previewGeometry.width,395);
+    c.showPreview(w,c.emptyPart(full,'bottom-right'),full,'bottom-right');
+    assert.equal(c.dragPreview.visible,true);assert.equal(c.dragPreview.x,10);
+    assert.equal(c.previewZone,'bottom-right');c.hidePreview();assert.equal(c.previewArea,null);
 });
 test('live loader bypasses reused KWin IDs without running or unloading other scripts',()=>{
     for(const ids of [[],[1],[0,2,3],[0,4,5]]) {
@@ -329,6 +409,20 @@ test('pause stops placements and previews; resume retains the same layout',()=>{
     w.frameGeometry={x:200,y:200,width:100,height:100};w.interactiveMoveResizeFinished.emit();
     assert.equal(w.frameGeometry.x,200);assert.equal(c.dragPreview.visible,false);
     c.setPaused(false);assert.equal(m.root,tree);assert.equal(w.frameGeometry.x,10);
+});
+test('layout reconciliation never activates an unrelated stack',()=>{
+    const c=backend(),w=window(c),other={...w,desktopFileName:'other'};
+    c.assign(c.slotOf(w)[1],other);c.focused=w;c.Workspace.activeWindow=w;
+    c.currentPlacement={window:other,active:true};c.finishCurrentPlacement();
+    assert.equal(c.Workspace.activeWindow,w);
+});
+test('hidden stack members are not raised or selected by cycling',()=>{
+    const c=backend(),w=window(c),s=c.slotOf(w)[1],hidden={...w,minimized:true};
+    c.assign(s,hidden);c.focused=w;c.Workspace.activeWindow=w;
+    assert.equal(c.placements().some(p=>p.active),false);c.cycle(1);
+    assert.equal(c.Workspace.activeWindow,w);
+    const other={...w,desktopFileName:'other',frameGeometry:{...w.frameGeometry}};c.assign(s,other);
+    c.cycle(1);assert.equal(c.Workspace.activeWindow,other);c.cycle(1);assert.equal(c.Workspace.activeWindow,w);
 });
 test('snapshot restores saved geometry and leaves extra windows floating',()=>{
     const c=backend(),w=window(c),m=c.monitors[0];m.name='screen';w.internalId='a';

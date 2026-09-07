@@ -108,6 +108,7 @@ pub fn run(options: Options) -> Result<(), String> {
                 C::Pause(true) => "TilekeepPause".into(),
                 C::Pause(false) => "TilekeepResume".into(),
                 C::Retile => "TilekeepRetile".into(),
+                C::Unstack => "TilekeepUnstack".into(),
                 C::Compact => "TilekeepCompact".into(),
                 C::Gap(g) => format!("TilekeepSetGap{g}"),
                 C::SaveSnapshot => "TilekeepSaveSnapshot".into(),

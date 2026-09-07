@@ -118,6 +118,14 @@ pub fn run(opts: Options) -> Result<(), String> {
                     app.apply();
                 }
                 C::Retile => app.on_hotkey(Hotkey::Retile.id()),
+                C::Unstack => {
+                    if !crate::control::paused() {
+                        if let Some(w) = app.desktop.focused() {
+                            app.desktop.unstack(w);
+                            app.apply();
+                        }
+                    }
+                }
                 C::Compact => app.on_hotkey(Hotkey::Compact.id()),
                 C::SaveSnapshot => match crate::snapshots::save(app.desktop.snapshot(app.snapshot_windows())) {
                     Ok(id) => {

@@ -3,6 +3,7 @@ import argparse
 import json
 import pathlib
 import time
+import os
 import dbus
 
 parser=argparse.ArgumentParser()
@@ -39,9 +40,10 @@ def check(value,message):
     if not value: raise AssertionError(message)
     print('PASS',message,flush=True)
 
-settings_dir=pathlib.Path.home()/'.config/tilekeep'
+settings_dir=pathlib.Path(os.environ.get('XDG_CONFIG_HOME',pathlib.Path.home()/'.config'))/'tilekeep'
 def settings(): return json.loads((settings_dir/'settings.json').read_text())
 original_autostart=next(e[3].get('toggle-state',0) for e in entries() if e[1]=='Start with Linux')
+unsigned_build=any('signing key not configured' in e[1] for e in entries())
 try:
     for _ in range(30):
         if 'running' in str(props.Get('org.kde.StatusNotifierItem','Title')): break
@@ -52,7 +54,7 @@ try:
     click('4 px');check(settings()['gap']==4,'gap menu persists 4 pixels')
     click('1 px');check(settings()['gap']==1,'gap menu returns to 1 pixel')
     click('Start with Linux')
-    startup=pathlib.Path.home()/'.config/autostart/com.userfirst.tilekeep.desktop'
+    startup=settings_dir.parent/'autostart/com.userfirst.tilekeep.desktop'
     check(startup.exists() != bool(original_autostart),'startup toggle changes the real login entry')
     click('Start with Linux');check(startup.exists()==bool(original_autostart),'startup entry restored')
     before=set((settings_dir/'snapshots').glob('*.json')) if (settings_dir/'snapshots').exists() else set()
@@ -68,7 +70,13 @@ try:
     check(settings()['startup_snapshot']==snapshot.stem,'startup snapshot selection persists')
     click('None','Snapshot at startup');check(settings()['startup_snapshot'] is None,'startup snapshot can be disabled')
     click('Check for updates')
-    check(any('signing key not configured' in e[1] for e in entries()),'unconfigured updater reports its real status')
+    if unsigned_build:
+        check(any('signing key not configured' in e[1] for e in entries()),'unconfigured updater reports its real status')
+    else:
+        for _ in range(120):
+            if any('Up to date' in e[1] or 'ready —' in e[1] for e in entries()): break
+            time.sleep(1)
+        check(any('Up to date' in e[1] or 'ready —' in e[1] for e in entries()),'signed updater completes a real release check')
     print('Saved test snapshot:',snapshot,flush=True)
 finally:
     state=entries()

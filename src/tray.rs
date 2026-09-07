@@ -112,6 +112,7 @@ impl ksni::Tray for LinuxMenu {
             .into(),
             Self::check("Pause tiling", s.paused, Action::Pause),
             Self::item("Retile", Action::Retile),
+            Self::item("Unstack active window", Action::Unstack),
             Self::item("Compact this monitor", Action::Compact),
             SubMenu {
                 label: format!("Window gap: {} px", s.settings.gap),
@@ -235,6 +236,7 @@ impl PlatformTray {
             (format!("Tilekeep {}", env!("CARGO_PKG_VERSION")), None, None),
             ("Pause tiling".into(), Some(Action::Pause), Some(s.paused)),
             ("Retile".into(), Some(Action::Retile), None),
+            ("Unstack active window".into(), Some(Action::Unstack), None),
             ("Compact this monitor".into(), Some(Action::Compact), None),
             ("Start with Windows".into(), Some(Action::Autostart), Some(s.autostart)),
             ("Silent updates (next launch)".into(), Some(Action::AutomaticUpdates), Some(s.settings.automatic_updates)),
