@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test tests/kwin.test.cjs

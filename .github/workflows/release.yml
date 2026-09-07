@@ -1,0 +1,70 @@
+name: Signed portable release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            binary: target/release/wm
+            asset: tilekeep-linux-x86_64
+          - os: windows-latest
+            binary: target/release/wm.exe
+            asset: tilekeep-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    env:
+      TILEKEEP_UPDATE_PUBKEY: ${{ vars.TILEKEEP_UPDATE_PUBKEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate version and trust key
+        shell: python
+        run: |
+          import os, pathlib, re
+          version = re.search(r'^version = "([^"]+)"', pathlib.Path('Cargo.toml').read_text(), re.M)[1]
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + version
+          assert os.environ['TILEKEEP_UPDATE_PUBKEY'].strip(), 'Configure the public verification key first'
+          assert os.environ['TILEKEEP_UPDATE_PUBKEY'].strip() == pathlib.Path('release.pub').read_text().splitlines()[1]
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test tests/kwin.test.cjs
+      - name: Prepare artifact
+        shell: python
+        run: |
+          import pathlib, shutil
+          pathlib.Path('dist').mkdir(exist_ok=True)
+          shutil.copy2('${{ matrix.binary }}', 'dist/${{ matrix.asset }}')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Sign binaries and manifest
+        env:
+          TILEKEEP_UPDATE_SECRET_KEY: ${{ secrets.TILEKEEP_UPDATE_SECRET_KEY }}
+          TILEKEEP_UPDATE_KEY_PASSWORD: ${{ secrets.TILEKEEP_UPDATE_KEY_PASSWORD }}
+          TILEKEEP_UPDATE_PUBKEY: ${{ vars.TILEKEEP_UPDATE_PUBKEY }}
+        shell: bash
+        run: RELEASE_VERSION="${GITHUB_REF_NAME#v}" python3 scripts/sign-release.py
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

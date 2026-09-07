@@ -1,0 +1,352 @@
+// Run with: node --test tests/kwin.test.cjs
+// Execute the actual compositor-side functions without touching the desktop.
+const {readFileSync} = require('node:fs');
+const vm = require('node:vm');
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const {loadScript}=require('./kwin-loader.cjs');
+
+function backend() {
+    const source = readFileSync(new URL('../src/linux/kwin.qml', `file://${__filename}`), 'utf8');
+    const functions = source.slice(source.indexOf('    function rect('), source.indexOf('    Component.onCompleted:'));
+    const timer = () => ({running:false, restart(){this.running=true;}, stop(){this.running=false;}});
+    const context = vm.createContext({
+        console:{log(){}}, gap:10, dryRun:false, enabled:true, paused:false, minRatio:.05, maxRatio:.95,
+        monitors:[], focused:null, floating:new Set(), identities:new Map(), expectedGeometry:new Map(),
+        deferredPlacements:new Map(), interactiveWindows:new Set(), placementQueue:[], currentPlacement:null,
+        placementAttempt:0, windowConnections:new Map(), sequence:1,pendingSnapshot:null,
+        previewOwner:null,previewGeometry:null,dragPreview:{visible:false},
+        placementDeadline:timer(), placementSpacing:timer(), recoveryTimer:timer(),workAreaTimer:timer(),
+        KWin:{MaximizeArea:0},
+        Workspace:{currentDesktop:1,currentActivity:'test',raiseWindow(){},hideOutline(){}},
+    });
+    context.Workspace.clientArea=(_option,output)=>context.monitors.find(m=>m.output===output).area;
+    vm.runInContext(functions,context);
+    return context;
+}
+function signal() {
+    const handlers=new Set();
+    return {connect:f=>handlers.add(f),disconnect:f=>handlers.delete(f),emit(...args){for(const f of handlers)f(...args);},handlers};
+}
+function window(c, {async=false}={}) {
+    const w={managed:true, normalWindow:true, moveable:true, resizeable:true, caption:'test',
+        desktopFileName:'test', output:1, desktops:[1], activities:[], setMaximize(){},
+        frameGeometryChanged:signal(),interactiveMoveResizeStarted:signal(),interactiveMoveResizeStepped:signal(),
+        interactiveMoveResizeFinished:signal(),minimizedChanged:signal(),maximizedChanged:signal(),
+        fullScreenChanged:signal(),desktopsChanged:signal(),activitiesChanged:signal()};
+    let geometry={x:0,y:0,width:100,height:100};
+    Object.defineProperty(w,'frameGeometry',{get:()=>geometry,set:g=>{w.requested=g;if(!async){geometry=g;w.frameGeometryChanged.emit();}}});
+    w.commit=()=>{geometry=w.requested;w.frameGeometryChanged.emit();};
+    const m={output:1,area:{x:0,y:0,width:1000,height:800},root:c.leaf()};
+    c.monitors.push(m);c.assign(m.root,w);c.connectWindow(w);
+    return w;
+}
+test('synchronous geometry completion disarms its deadline',()=>{
+    const c=backend();const w=window(c);c.apply();
+    assert.equal(c.currentPlacement,null);assert.equal(c.placementDeadline.running,false);
+    assert.equal(w.frameGeometry.width,980);
+});
+test('sleeping clients are reconciled after wake without another retile command',()=>{
+    const c=backend();const w=window(c,{async:true});c.apply();
+    for(let i=0;i<3;i++)c.placementTimedOut();
+    assert.equal(c.deferredPlacements.size,1);assert.equal(c.currentPlacement,null);
+    c.retryDeferredPlacements();w.commit();
+    assert.equal(c.currentPlacement,null);assert.equal(c.deferredPlacements.size,0);
+    assert.equal(w.frameGeometry.width,980);
+});
+test('interactive moves cancel pending requests and never resize with undefined geometry',()=>{
+    const c=backend();const w=window(c,{async:true});c.apply();
+    w.interactiveMoveResizeStarted.emit();c.placementTimedOut();c.retryDeferredPlacements();c.apply();
+    assert.equal(c.currentPlacement,null);assert.equal(c.expectedGeometry.size,0);
+    assert.equal(c.interactiveWindows.size,1);
+    w.interactiveMoveResizeFinished.emit();assert.equal(c.interactiveWindows.size,0);
+});
+test('removal of an in-flight window clears pending and signal references',()=>{
+    const c=backend();const w=window(c,{async:true});c.apply();
+    c.disconnectWindow(w);c.vanished(w);c.placementTimedOut();
+    assert.equal(c.currentPlacement,null);assert.equal(c.expectedGeometry.size,0);
+    assert.equal(w.frameGeometryChanged.handlers.size,0);assert.equal(c.windowConnections.size,0);
+});
+test('nested split resize has internal bounds and preserves valid ratios',()=>{
+    const c=backend();const w=window(c);const m=c.monitors[0];
+    c.splitSlot(m,m.root,'x',false,{caption:'second'});
+    c.splitSlot(m,m.root.first,'y',false,{caption:'third'});
+    const before=c.rects(m).get(c.slotOf(w)[1]);
+    c.adjustRatio(w,before,{...before,width:before.width+100});
+    assert.ok(m.root.ratio>.5&&m.root.ratio<1);
+});
+test('drop corner uses the dominant axis, not unconditional left/right priority',()=>{
+    const c=backend();const r={x:0,y:0,width:100,height:100};
+    assert.equal(c.zone(r,{x:20,y:1}),'top');assert.equal(c.zone(r,{x:1,y:20}),'left');
+    assert.equal(c.zone(r,{x:50,y:50}),'center');
+});
+test('minimized or floating deferred windows are not moved on recovery',()=>{
+    for(const mode of ['minimized','floating']) {
+        const c=backend();const w=window(c,{async:true});c.apply();
+        for(let i=0;i<3;i++)c.placementTimedOut();
+        if(mode==='minimized')w.minimized=true;else c.floating.add(w);
+        c.retryDeferredPlacements();assert.equal(c.currentPlacement,null);
+    }
+});
+test('maximized, fullscreen and security-prompt windows are left alone',()=>{
+    const c=backend();const w=window(c);
+    w.maximizeMode=3;assert.equal(c.visibleHere(w),false);
+    w.maximizeMode=0;w.fullScreen=true;assert.equal(c.visibleHere(w),false);
+    w.fullScreen=false;w.desktopFileName='org.kde.kwin.eisprompter';assert.equal(c.tileable(w),false);
+});
+test('Escape-cancelled moves do not drop onto the slot still under the cursor',()=>{
+    const c=backend();const w=window(c);c.apply();
+    let dropped=false;c.drop=()=>{dropped=true;};w.move=true;
+    w.interactiveMoveResizeStarted.emit();
+    // KWin has restored the original rectangle when Finished is emitted.
+    w.interactiveMoveResizeFinished.emit();
+    assert.equal(dropped,false);assert.equal(c.interactiveWindows.size,0);
+});
+test('dragging an excluded prompt never enrolls it in the tiling tree',()=>{
+    const c=backend();const w=window(c);c.detach(w);w.desktopFileName='org.kde.kwin.eisprompter';w.move=true;
+    let dropped=false;c.drop=()=>{dropped=true;};
+    w.interactiveMoveResizeStarted.emit();w.frameGeometry={x:200,y:200,width:300,height:200};
+    w.interactiveMoveResizeFinished.emit();
+    assert.equal(dropped,false);assert.equal(c.slotOf(w),null);
+});
+test('split allocation honors client minimum sizes including decorations',()=>{
+    const c=backend();const w=window(c);w.minSize={width:200,height:120};
+    w.clientGeometry={x:0,y:20,width:100,height:80};
+    const other={minSize:{width:200,height:620}};const m=c.monitors[0];
+    c.splitSlot(m,m.root,'y',false,other);
+    const rects=c.rects(m), first=rects.get(c.slotOf(w)[1]),second=rects.get(c.slotOf(other)[1]);
+    assert.ok(first.height>=140);assert.equal(second.height,620);
+    assert.equal(first.y+first.height+c.gap,second.y);
+    assert.ok(second.y+second.height<=m.area.height-c.gap);
+});
+test('an impossible split stacks in the target rather than overlapping its neighbor',()=>{
+    const c=backend();const w=window(c);w.minSize={width:800,height:600};
+    const m=c.monitors[0],other={minSize:{width:800,height:600}};
+    c.splitSlot(m,m.root,'y',false,other);
+    assert.equal(m.root.kind,'leaf');assert.equal(m.root.windows.length,2);
+    assert.equal(c.slotOf(w)[1],c.slotOf(other)[1]);
+});
+test('drop outline predicts minimum-constrained placement and the stack fallback',()=>{
+    const c=backend();const target=window(c);target.minSize={width:200,height:140};
+    const m=c.monitors[0],r=c.rects(m).get(m.root),w={minSize:{width:200,height:620}};
+    const preview=c.dropPreview(w,[m,m.root,r],'bottom');
+    c.splitSlot(m,m.root,'y',false,w);
+    assert.deepEqual({...preview},{...c.rects(m).get(c.slotOf(w)[1])});
+    const slot=c.slotOf(w)[1],slotRect=c.rects(m).get(slot);
+    const stacked=c.dropPreview({minSize:{width:200,height:620}},[m,slot,slotRect],'top');
+    assert.deepEqual({...stacked},{...slotRect});
+});
+test('stack shortcut does not collide with Spectacle or reuse the old saved binding',()=>{
+    const source=readFileSync(new URL('../src/linux/kwin.qml', `file://${__filename}`),'utf8');
+    assert.match(source,/name: "TilekeepStackAtCursor";[^\n]*sequence: "Meta\+Shift\+G"/);
+    assert.doesNotMatch(source,/name: "TilekeepStack";/);
+});
+test('drag preview stays visible when KWin clears its shared outline on every step',()=>{
+    const c=backend();const w=window(c);c.apply();w.move=true;
+    c.Workspace.cursorPos={x:500,y:400};
+    let shows=0;let visible=false;
+    Object.defineProperty(c.dragPreview,'visible',{get:()=>visible,set:v=>{if(v)shows++;visible=v;}});
+    w.interactiveMoveResizeStarted.emit();
+    for(let i=0;i<100;i++) {
+        w.interactiveMoveResizeStepped.emit();
+        c.Workspace.hideOutline(); // KWin does this after the script's callback.
+        assert.equal(c.dragPreview.visible,true);
+    }
+    assert.equal(shows,1);
+    const first=c.previewGeometry;
+    w.interactiveMoveResizeStepped.emit();assert.equal(c.previewGeometry,first);
+    w.interactiveMoveResizeFinished.emit();assert.equal(c.dragPreview.visible,false);
+});
+test('preview target changes move the existing surface without hiding it',()=>{
+    const c=backend();const w=window(c);
+    c.showPreview(w,{x:10,y:10,width:400,height:300});
+    let hides=0;
+    Object.defineProperty(c.dragPreview,'visible',{get:()=>true,set:v=>{if(!v)hides++;}});
+    c.showPreview(w,{x:420,y:10,width:570,height:780});
+    assert.equal(hides,0);assert.equal(c.dragPreview.x,420);assert.equal(c.dragPreview.width,570);
+});
+test('preview is dismissed on leaving outputs or removing its owner, not by another window',()=>{
+    const c=backend();const w=window(c);w.move=true;
+    c.Workspace.cursorPos={x:500,y:400};
+    w.interactiveMoveResizeStarted.emit();w.interactiveMoveResizeStepped.emit();
+    c.hidePreview({});assert.equal(c.dragPreview.visible,true);
+    c.Workspace.cursorPos={x:2000,y:400};w.interactiveMoveResizeStepped.emit();
+    assert.equal(c.dragPreview.visible,false);
+    c.showPreview(w,{x:10,y:10,width:400,height:300});c.vanished(w);
+    assert.equal(c.dragPreview.visible,false);assert.equal(c.previewOwner,null);
+});
+test('preview is an independent non-focusable surface, never the shared KWin outline',()=>{
+    const source=readFileSync(new URL('../src/linux/kwin.qml', `file://${__filename}`),'utf8');
+    assert.doesNotMatch(source,/Workspace\.(showOutline|hideOutline)\(/);
+    assert.match(source,/transientParent: null/);
+    assert.match(source,/Qt\.WindowTransparentForInput/);
+    assert.match(source,/Qt\.WindowDoesNotAcceptFocus/);
+});
+test('invisible windows do not constrain resizing into apparently empty space',()=>{
+    for(const state of [{minimized:true},{hidden:true},{desktops:[2]},{activities:['elsewhere']}]) {
+        const c=backend(),w=window(c),m=c.monitors[0];
+        const hidden={minSize:{width:450,height:600},...state};
+        c.splitSlot(m,m.root,'x',false,hidden);
+        const before=c.rects(m).get(c.slotOf(w)[1]);
+        c.adjustRatio(w,before,{...before,width:850});
+        assert.equal(c.rects(m).get(c.slotOf(w)[1]).width,850);
+        assert.equal(c.minimumSize(c.slotOf(hidden)[1]).width,0);
+    }
+});
+test('edge drops into minimized slots fill the whole vacancy and preserve hidden occupants',()=>{
+    for(const z of ['left','right','top','bottom']) {
+        const c=backend(),w=window(c),m=c.monitors[0];
+        const hidden={minimized:true,minSize:{width:450,height:600}};
+        c.splitSlot(m,m.root,'x',false,hidden);
+        const source=c.slotOf(w)[1],target=c.slotOf(hidden)[1],r=c.rects(m).get(target);
+        const p={x:r.x+r.width/2,y:r.y+r.height/2};
+        if(z==='left')p.x=r.x+1;if(z==='right')p.x=r.x+r.width-1;
+        if(z==='top')p.y=r.y+1;if(z==='bottom')p.y=r.y+r.height-1;
+        assert.deepEqual({...c.dropPreview(w,[m,target,r],z)},{...r});
+        assert.equal(c.drop(w,p,false),true);
+        assert.equal(c.slotOf(w)[1],target);assert.equal(c.slotOf(hidden)[1],source);
+        assert.equal(hidden.minimized,true);assert.equal(c.leaves(m.root).length,2);
+        assert.deepEqual({...c.rects(m).get(target)},{...r});
+        hidden.minimized=false;
+        assert.ok(c.rects(m).get(source).width>=450);
+    }
+});
+test('an edge drop fills a genuinely empty slot without splitting it',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],other={};
+    c.splitSlot(m,m.root,'x',false,other);
+    const target=c.slotOf(other)[1],r=c.rects(m).get(target);c.detach(other);
+    assert.equal(c.drop(w,{x:r.x+1,y:r.y+1},false),true);
+    assert.equal(c.slotOf(w)[1],target);assert.equal(c.leaves(m.root).length,2);
+});
+test('live loader bypasses reused KWin IDs without running or unloading other scripts',()=>{
+    for(const ids of [[],[1],[0,2,3],[0,4,5]]) {
+        const scripts=new Map(ids.map(id=>[`other-${id}`,id]));
+        const exported=new Map(ids.map(id=>[id,`other-${id}`]));
+        const ran=[];
+        const dbus=(path,method,file,name)=>{
+            if(!path)return [...exported.keys()].map(id=>`/Scripting/Script${id}`).join('\n');
+            if(method.endsWith('.loadDeclarativeScript')) {
+                const id=scripts.size;scripts.set(name,id);
+                if(!exported.has(id))exported.set(id,name);
+                return String(id);
+            }
+            if(method.endsWith('.unloadScript')) {
+                assert.ok(!file.startsWith('other-'));
+                const id=scripts.get(file);scripts.delete(file);
+                if(exported.get(id)===file)exported.delete(id);
+                return 'true';
+            }
+            if(method.endsWith('.run')) {ran.push(exported.get(Number(path.split('Script').pop())));return '';}
+            throw Error('Unexpected call');
+        };
+        loadScript(dbus,'test.qml','tilekeep-test');
+        assert.deepEqual(ran,['tilekeep-test']);assert.equal(scripts.size,ids.length+1);
+        for(const id of ids)assert.equal(exported.get(id),`other-${id}`);
+    }
+});
+test('old resize stops absorb a vacant strip and its gap on every side',()=>{
+    for(const axis of ['x','y'])for(const first of [true,false])for(const minimized of [true,false]) {
+        const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true};
+        c.splitSlot(m,m.root,axis,first,hidden);
+        const vacancy=c.slotOf(hidden)[1];if(!minimized)c.detach(hidden);
+        m.root.ratio=first?.05:.95;
+        const map=c.rects(m),r=map.get(c.slotOf(w)[1]);
+        assert.deepEqual({...r},{...c.inset(m.area)});
+        assert.equal(c.area(map.get(vacancy)),0);
+        assert.equal(c.slotAt({x:r.x,y:r.y})[1],c.slotOf(w)[1]);
+        assert.equal(c.slotAt({x:r.x+r.width-1,y:r.y+r.height-1})[1],c.slotOf(w)[1]);
+        if(minimized)assert.equal(c.slotOf(hidden)[1],vacancy);
+    }
+});
+test('Chromium above a collapsed vacancy meets Dolphin with only the configured gap',()=>{
+    const c=backend(),browser=window(c),m=c.monitors[0],dolphin={},hidden={minimized:true};
+    m.area={x:1108,y:0,width:1947,height:1728};
+    c.splitSlot(m,m.root,'y',false,dolphin);
+    c.splitSlot(m,c.slotOf(browser)[1],'y',false,hidden);
+    c.slotOf(browser)[1].parent.ratio=.95;
+    const map=c.rects(m),a=map.get(c.slotOf(browser)[1]),b=map.get(c.slotOf(dolphin)[1]);
+    assert.equal(a.height,849);assert.equal(b.y-c.rectBottom(a),10);
+});
+test('vacant-edge resize can reach the boundary and later reopen the space',()=>{
+    for(const axis of ['x','y'])for(const first of [true,false]) {
+        const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true};
+        c.splitSlot(m,m.root,axis,first,hidden);
+        const before=c.rects(m).get(c.slotOf(w)[1]),full=c.inset(m.area);
+        c.adjustRatio(w,before,full);
+        assert.equal(m.root.ratio,first?0:1);
+        assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...full});
+        c.adjustRatio(w,full,before);
+        assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...before});
+    }
+});
+test('occupied minimum sizes and ordinary large empty slots remain intact',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],other={minSize:{width:200,height:200}};
+    c.splitSlot(m,m.root,'x',false,other);m.root.ratio=.95;
+    assert.ok(c.rects(m).get(c.slotOf(other)[1]).width>=200);
+    other.minimized=true;m.root.ratio=.5;
+    assert.ok(c.rects(m).get(c.slotOf(other)[1]).width>0);
+    m.root.ratio=.95;
+    assert.equal(c.area(c.rects(m).get(c.slotOf(other)[1])),0);
+    other.minimized=false;
+    assert.ok(c.rects(m).get(c.slotOf(other)[1]).width>=200);
+});
+test('collapsed placeholders do not add invisible minimum-size gaps to ancestors',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true};w.minSize={width:300,height:200};
+    c.splitSlot(m,m.root,'y',false,hidden);m.root.ratio=.95;
+    assert.deepEqual({...c.minimumSize(m.root)},{width:300,height:200});
+});
+test('panel work-area changes reserve space on all four edges without a monitor event',()=>{
+    for(const available of [
+        {x:0,y:30,width:1000,height:770},{x:0,y:0,width:1000,height:770},
+        {x:30,y:0,width:970,height:800},{x:0,y:0,width:970,height:800},
+    ]) {
+        const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;c.apply();
+        const originalRoot=m.root;c.Workspace.clientArea=()=>available;c.workAreasChanged();
+        assert.equal(m.root,originalRoot);
+        assert.deepEqual({...w.frameGeometry},{...c.inset(available)});
+        let calls=0;c.apply=()=>calls++;c.workAreasChanged();assert.equal(calls,0);
+    }
+});
+test('panel changes do not interrupt a drag and are applied on completion',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];c.apply();
+    const before={...w.frameGeometry};w.interactiveMoveResizeStarted.emit();
+    c.Workspace.clientArea=()=>({x:0,y:0,width:1000,height:760});
+    c.workAreasChanged();assert.deepEqual({...w.frameGeometry},before);assert.equal(m.area.height,800);
+    w.interactiveMoveResizeFinished.emit();assert.equal(m.area.height,760);
+    assert.equal(w.frameGeometry.height,740);
+});
+test('work-area refresh preserves other monitors and restores space when a panel leaves',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];
+    const second={output:2,area:{x:1000,y:0,width:1000,height:800},root:c.leaf()};c.monitors.push(second);
+    let panel=true;c.Workspace.clientArea=(_option,output)=>output===2?second.area:
+        {x:0,y:0,width:1000,height:panel?770:800};
+    c.workAreasChanged();assert.equal(w.frameGeometry.height,750);assert.equal(second.area.height,800);
+    panel=false;c.workAreasChanged();assert.equal(w.frameGeometry.height,780);
+});
+test('pause stops placements and previews; resume retains the same layout',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];c.apply();const tree=m.root;
+    c.setPaused(true);w.move=true;w.interactiveMoveResizeStarted.emit();
+    w.frameGeometry={x:200,y:200,width:100,height:100};w.interactiveMoveResizeFinished.emit();
+    assert.equal(w.frameGeometry.x,200);assert.equal(c.dragPreview.visible,false);
+    c.setPaused(false);assert.equal(m.root,tree);assert.equal(w.frameGeometry.x,10);
+});
+test('snapshot restores saved geometry and leaves extra windows floating',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];m.name='screen';w.internalId='a';
+    const extra={...w,internalId:'b',desktopFileName:'extra',caption:'extra'};
+    c.Workspace.stackingOrder=[w,extra];c.syncMonitors=()=>{};c.snapshotRestored={call(){}};
+    const saved={schema:1,gap:1,windows:[{token:'old',app:'test',title:'test',rect:{x:1,y:1,width:998,height:798},floating:false}],monitors:[{name:'screen',area:m.area,root:{kind:'leaf',windows:['old'],active:0}}]};
+    c.restoreSnapshot(JSON.stringify(saved));
+    assert.equal(c.gap,1);assert.equal(c.slotOf(w)[1],m.root);
+    assert.equal(c.floating.has(extra),true);assert.equal(c.slotOf(extra),null);
+    assert.deepEqual({...w.frameGeometry},{x:1,y:1,width:998,height:798});
+});
+test('an app launched after snapshot loading claims its saved slot',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];m.name='screen';w.internalId='a';
+    c.Workspace.stackingOrder=[w];c.syncMonitors=()=>{};c.snapshotRestored={call(){}};
+    const saved={schema:1,gap:1,windows:[{token:'later',app:'later',title:'later',rect:{x:1,y:1,width:998,height:798},floating:false}],monitors:[{name:'screen',area:m.area,root:{kind:'leaf',windows:['later'],active:0}}]};
+    c.restoreSnapshot(JSON.stringify(saved));
+    const later={...w,internalId:'new',desktopFileName:'later',caption:'later'};
+    assert.equal(c.appeared(later),true);assert.equal(c.slotOf(later)[1],m.root);
+    assert.equal(c.floating.has(w),true);
+    assert.equal(JSON.parse(c.snapshotRestored.arguments[0]).missing,0);
+});

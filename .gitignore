@@ -1,0 +1,11 @@
+/target
+*.log
+.superpowers/
+/dist/
+*.key
+*.password
+.env
+.env.*
+__pycache__/
+# Local development archives may include desktop/window titles.
+/docs/superpowers/
