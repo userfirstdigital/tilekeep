@@ -36,6 +36,7 @@ This closes no application windows. Settings and snapshots are retained.
 
 Local builds without a signing key show “release signing key not configured”, not “up to date”.
 An end-to-end public update is not verified until a signed newer release is actually published.
+The Linux v0.2.1 to v0.2.2 path has now passed; see [verification notes](verification-0.2.2.md).
 Verify one update from a signed older installed build on each OS before announcing a release.
 Windows binaries are not Authenticode-signed; initial download warnings may still appear.
 

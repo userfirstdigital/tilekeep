@@ -11,6 +11,24 @@ Install the built/downloaded executable with `--install`, then run the installed
 `~/.local/share/tilekeep/bin/tilekeep`; Windows: `%LOCALAPPDATA%\Programs\Tilekeep\tilekeep.exe`.
 Use the tray's **Start with Linux/Windows** checkbox to opt into login startup.
 
+On Linux, from the folder containing the download:
+
+```sh
+chmod +x tilekeep-linux-x86_64
+./tilekeep-linux-x86_64 --install
+~/.local/share/tilekeep/bin/tilekeep
+```
+
+On Windows, from PowerShell in the download folder:
+
+```powershell
+.\tilekeep-windows-x86_64.exe --install
+Start-Process "$env:LOCALAPPDATA\Programs\Tilekeep\tilekeep.exe"
+```
+
+Use the installed copy for automatic updates. Running the downloaded copy directly is supported,
+but it does not replace itself. Login startup and loading a startup snapshot are separate choices.
+
 **Snapshots:** choose **Save snapshot now**, then select it from **Load snapshot** or
 **Snapshot at startup**. Saved layouts match existing windows and launch missing applications;
 extra windows remain open. Exact placement requires the same monitors and available work area.
