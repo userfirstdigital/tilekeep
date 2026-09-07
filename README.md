@@ -1,5 +1,8 @@
 # Tilekeep — slot tiling for Windows and Linux
 
+[Download the latest release](https://github.com/userfirstdigital/tilekeep/releases/latest).
+The default development branch is `master`.
+
 Tilekeep has a native tray menu for pause/resume, gap size, retile/compact, saved snapshots,
 login startup, and update status. Settings are saved per user. `wm` remains the development binary name.
 
@@ -17,7 +20,7 @@ Apps that require a launcher or do not reopen multiple windows themselves may ne
 **Updates:** signed releases download silently in the background and install on the next launch.
 Development builds without a release verification key clearly show that updates are unavailable.
 Release publication and trust setup are described in [the release checklist](docs/release-checklist.md).
-The public release/update path still requires that one-time repository/key setup and an end-to-end release test.
+Official release builds include the trusted verification key published in `release.pub`.
 
 Configuration, snapshots, and `tilekeep.log` live in `~/.config/tilekeep` on Linux (respecting XDG paths)
 and the user's configuration directory on Windows. `--no-tray` runs without the tray; `--dry-run`
