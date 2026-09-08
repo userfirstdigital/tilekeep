@@ -7,6 +7,7 @@ const {capture,compare}=require('./kwin-desktop.cjs');
 const dbus=(...a)=>execFileSync('qdbus6',['org.kde.KWin',...a],{encoding:'utf8'}).trim();
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 if(!process.argv.includes('--allow-test-windows'))throw Error('Requires --allow-test-windows');
+if(!process.argv.includes('--allow-live-compositor-risk'))throw Error('Live KWin tests can crash the desktop session. Prefer plasma-isolated.cjs; --allow-live-compositor-risk is required on a disposable desktop.');
 const index=process.argv.indexOf('--area'),coords=index<0?[]:process.argv[index+1].split(',').map(Number);
 if(coords.length!==4||!coords.every(Number.isInteger)||coords[2]<420||coords[3]<500)throw Error('Requires --area x,y,width,height, at least 420×500');
 const area={x:coords[0],y:coords[1],width:coords[2],height:coords[3]};

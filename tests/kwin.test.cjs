@@ -15,12 +15,19 @@ function backend() {
         monitors:[], focused:null, floating:new Set(), identities:new Map(), expectedGeometry:new Map(),
         deferredPlacements:new Map(), interactiveWindows:new Set(), placementQueue:[], currentPlacement:null,
         placementAttempt:0, windowConnections:new Map(), sequence:1,pendingSnapshot:null,
-        previewOwner:null,previewGeometry:null,dragPreview:{visible:false},resizeGuide:{visible:false},resizeGuides:[],
+        previewOwner:null,previewGeometry:null,dragPreview:{visible:false},resizeGuide:{visible:false},resizeGuides:[],resizePreviewWindows:new Map(),pendingResizeEnds:new Map(),
         displayTransition:false,displayEpoch:0,displayFingerprint:'',displayStableTicks:0,displaySamples:[],pendingWindows:new Set(),deferredSnapshot:null,saveAfterDisplay:false,
-        placementDeadline:timer(), placementSpacing:timer(), recoveryTimer:timer(),workAreaTimer:timer(),
+        placementDeadline:timer(), placementSpacing:timer(), recoveryTimer:timer(),workAreaTimer:timer(),resizeFinishTimer:timer(),
         KWin:{MaximizeArea:0},
         Workspace:{currentDesktop:1,currentActivity:'test',raiseWindow(){},hideOutline(){}},
     });
+    context.root=context;
+    context.windowObserver={createObject(_parent,{target,handlers}){
+        const links=[['frameGeometryChanged','geometry'],['interactiveMoveResizeStarted','started'],['interactiveMoveResizeStepped','stepped'],['interactiveMoveResizeFinished','finished'],['minimizedChanged','minimized'],['maximizedChanged','minimized'],['fullScreenChanged','minimized'],['desktopsChanged','minimized'],['activitiesChanged','minimized']];
+        for(const [s,h] of links)target[s].connect(handlers[h]);
+        const disconnect=()=>{for(const [s,h] of links)target[s].disconnect(handlers[h]);};
+        return {set target(v){if(v===null)disconnect();},destroy:disconnect};
+    }};
     context.Workspace.clientArea=(_option,output)=>context.monitors.find(m=>m.output===output).area;
     vm.runInContext(functions,context);
     return context;
@@ -52,6 +59,11 @@ function displayFixture(options={}) {
     return {c,w,m,output};
 }
 function settleDisplays(c) {for(let i=0;i<5;i++)c.workAreasChanged();}
+function arrange(c,m,pairs) {
+    const items=pairs.map(([w,rect])=>{const slot=c.leaf();c.assign(slot,w);return {slot,rect};});
+    m.root=c.layoutAround(items,c.inset(m.area),0);assert.ok(m.root,'fixture is a valid layout');
+    for(const [w,r] of pairs)assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},r);
+}
 test('the observed DP-3 -> Placeholder-1 -> DP-3 wake sequence keeps the original tree and geometry',()=>{
     const {c,w,m,output}=displayFixture();c.apply();
     const tree=m.root,before={...w.frameGeometry};
@@ -130,7 +142,7 @@ test('a drag interrupted by unplugging cannot overwrite the preserved layout whe
     c.Workspace.screens=[];c.beginDisplayTransition();settleDisplays(c);
     w.frameGeometry={x:100,y:100,width:400,height:400};
     c.Workspace.screens=[{...output}];settleDisplays(c);
-    w.interactiveMoveResizeFinished.emit();
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
     assert.equal(m.root,tree);assert.deepEqual({...w.frameGeometry},before);
 });
 test('paused tiling stays paused across reconnect and resumes with the original layout',()=>{
@@ -145,7 +157,7 @@ test('native resize steps arriving before screensChanged cannot write geometry o
     w.interactiveMoveResizeStarted.emit();c.Workspace.screens=[];
     w.interactiveMoveResizeStepped.emit({...before,width:before.width-100});
     assert.equal(c.displayTransition,true);assert.deepEqual({...w.frameGeometry},before);
-    w.interactiveMoveResizeFinished.emit();assert.equal(m.root,tree);
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();assert.equal(m.root,tree);
     assert.equal(c.slotAt({x:50,y:50}),null);assert.equal(c.interactiveWindows.size,0);
 });
 test('invalid and disabled outputs never replace a saved real-monitor area',()=>{
@@ -210,7 +222,7 @@ test('interactive moves cancel pending requests and never resize with undefined 
     w.interactiveMoveResizeStarted.emit();c.placementTimedOut();c.retryDeferredPlacements();c.apply();
     assert.equal(c.currentPlacement,null);assert.equal(c.expectedGeometry.size,0);
     assert.equal(c.interactiveWindows.size,1);
-    w.interactiveMoveResizeFinished.emit();assert.equal(c.interactiveWindows.size,0);
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();assert.equal(c.interactiveWindows.size,0);
 });
 test('removal of an in-flight window clears pending and signal references',()=>{
     const c=backend();const w=window(c,{async:true});c.apply();
@@ -250,14 +262,14 @@ test('Escape-cancelled moves do not drop onto the slot still under the cursor',(
     let dropped=false;c.drop=()=>{dropped=true;};w.move=true;
     w.interactiveMoveResizeStarted.emit();
     // KWin has restored the original rectangle when Finished is emitted.
-    w.interactiveMoveResizeFinished.emit();
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
     assert.equal(dropped,false);assert.equal(c.interactiveWindows.size,0);
 });
 test('dragging an excluded prompt never enrolls it in the tiling tree',()=>{
     const c=backend();const w=window(c);c.detach(w);w.desktopFileName='org.kde.kwin.eisprompter';w.move=true;
     let dropped=false;c.drop=()=>{dropped=true;};
     w.interactiveMoveResizeStarted.emit();w.frameGeometry={x:200,y:200,width:300,height:200};
-    w.interactiveMoveResizeFinished.emit();
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
     assert.equal(dropped,false);assert.equal(c.slotOf(w),null);
 });
 test('split allocation honors client minimum sizes including decorations',()=>{
@@ -306,7 +318,7 @@ test('drag preview stays visible when KWin clears its shared outline on every st
     assert.equal(shows,1);
     const first=c.previewGeometry;
     w.interactiveMoveResizeStepped.emit();assert.equal(c.previewGeometry,first);
-    w.interactiveMoveResizeFinished.emit();assert.equal(c.dragPreview.visible,false);
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();assert.equal(c.dragPreview.visible,false);
 });
 test('preview target changes move the existing surface without hiding it',()=>{
     const c=backend();const w=window(c);
@@ -518,6 +530,9 @@ test('resizing into empty space does not move unrelated windows across an ancest
         c.splitSlot(m,c.slotOf(w)[1],axis==='x'?'y':'x',false,unrelated);
         c.detach(empty);
         const original=c.rects(m),before=original.get(c.slotOf(w)[1]),fixed=original.get(c.slotOf(unrelated)[1]),after={...before};
+        // A visible stretch of empty space breaks the otherwise aligned edge.
+        if(axis==='x'){fixed.y+=60;fixed.height-=60;}else{fixed.x+=60;fixed.width-=60;}
+        arrange(c,m,[[w,{...before}],[unrelated,{...fixed}]]);
         const edge=axis==='x'?(first?'left':'right'):(first?'top':'bottom');
         c.setEdge(after,edge,c.edgePosition(before,edge)+(first?-150:150));
         assert.equal(c.adjustRatio(w,before,after),true);
@@ -528,16 +543,19 @@ test('resizing into empty space does not move unrelated windows across an ancest
         assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},after,'new window cannot reclaim occupied resize area');
     }
 });
-test('a shared resize affects only directly touching neighbors, not their unrelated siblings',()=>{
-    const c=backend(),w=window(c),m=c.monitors[0],neighbor={},unrelated={};c.gap=1;
-    c.splitSlot(m,m.root,'x',false,neighbor);c.splitSlot(m,c.slotOf(w)[1],'y',false,unrelated);
-    const old=c.rects(m),before=old.get(c.slotOf(w)[1]),fixed=old.get(c.slotOf(unrelated)[1]);
-    const after={...before,width:before.width+100};
-    assert.equal(c.adjustRatio(w,before,after),true);
-    const next=c.rects(m);
-    assert.deepEqual({...next.get(c.slotOf(unrelated)[1])},{...fixed});
-    assert.deepEqual({...next.get(c.slotOf(w)[1])},after);
-    assert.equal(next.get(c.slotOf(neighbor)[1]).x,c.rectRight(after)+1);
+test('connected windows below and across the shared edge follow in both directions, but separated aligned windows stay fixed',()=>{
+    for(const delta of [-100,100]) {
+        const c=backend(),w=window(c),m=c.monitors[0],below={},neighbor={},unrelated={};c.gap=1;
+        const before={x:1,y:1,width:499,height:250},bottom={x:1,y:252,width:499,height:250};
+        const across={x:501,y:1,width:498,height:501},fixed={x:1,y:600,width:499,height:199};
+        arrange(c,m,[[w,before],[below,bottom],[neighbor,across],[unrelated,fixed]]);
+        const after={...before,width:before.width+delta};assert.equal(c.adjustRatio(w,before,after),true);
+        const next=c.rects(m);
+        assert.deepEqual({...next.get(c.slotOf(unrelated)[1])},fixed);
+        assert.deepEqual({...next.get(c.slotOf(w)[1])},after);
+        assert.deepEqual({...next.get(c.slotOf(below)[1])},{...bottom,width:bottom.width+delta});
+        assert.deepEqual({...next.get(c.slotOf(neighbor)[1])},{...across,x:across.x+delta,width:across.width-delta});
+    }
 });
 test('shrinking a monitor-filling window creates reusable space without a parent split',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],before=c.rects(m).get(m.root);
@@ -545,6 +563,125 @@ test('shrinking a monitor-filling window creates reusable space without a parent
     assert.equal(c.adjustRatio(w,before,after),true);
     assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},after);
     assert.ok(c.leaves(m.root).some(s=>!s.windows.length));
+});
+test('all four shared-edge directions pull and push a connected grid without depending on tree ancestry',()=>{
+    for(const edge of ['left','right','top','bottom'])for(const delta of [-90,90]) {
+        const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;
+        const rs=[{x:1,y:1,width:499,height:399},{x:501,y:1,width:498,height:399},{x:1,y:401,width:499,height:398},{x:501,y:401,width:498,height:398}];
+        const index=edge==='left'?1:edge==='top'?2:0,ws=[{},{},{},{}];ws[index]=w;
+        arrange(c,m,ws.map((v,i)=>[v,rs[i]]));
+        const before=rs[index],after={...before};c.setEdge(after,edge,c.edgePosition(before,edge)+delta);
+        assert.equal(c.adjustRatio(w,before,after),true);
+        for(let i=0;i<4;i++) {
+            const expected={...rs[i]};
+            const moved=edge==='left'||edge==='right'?(i%2?'left':'right'):(i<2?'bottom':'top');
+            c.setEdge(expected,moved,c.edgePosition(expected,moved)+delta);
+            assert.deepEqual({...c.rects(m).get(c.slotOf(ws[i])[1])},expected);
+        }
+    }
+});
+test('a corner resize keeps both connected grid edges aligned',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],right={},below={},diagonal={};c.gap=1;
+    const before={x:1,y:1,width:499,height:399};
+    arrange(c,m,[[w,before],[right,{x:501,y:1,width:498,height:399}],[below,{x:1,y:401,width:499,height:398}],[diagonal,{x:501,y:401,width:498,height:398}]]);
+    assert.equal(c.adjustRatio(w,before,{...before,width:579,height:339}),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(diagonal)[1])},{x:581,y:341,width:418,height:458});
+    assert.deepEqual({...c.rects(m).get(c.slotOf(right)[1])},{x:581,y:1,width:418,height:339});
+    assert.deepEqual({...c.rects(m).get(c.slotOf(below)[1])},{x:1,y:341,width:579,height:458});
+});
+test('every connected window contributes its minimum size in either drag direction',()=>{
+    for(const grow of [false,true]) {
+        const c=backend(),w=window(c),m=c.monitors[0],below={minSize:{width:450,height:100}},right={minSize:{width:300,height:100}};c.gap=1;
+        const before={x:1,y:1,width:499,height:399};
+        arrange(c,m,[[w,before],[below,{x:1,y:401,width:499,height:398}],[right,{x:501,y:1,width:498,height:798}]]);
+        const plan=c.resizeLayout(w,before,{...before,width:grow?950:100});assert.ok(plan);m.root=plan.tree;
+        assert.equal(plan.rect.width,grow?697:450);
+        assert.equal(c.rects(m).get(c.slotOf(below)[1]).width,plan.rect.width);
+        assert.ok(c.rects(m).get(c.slotOf(right)[1]).width>=300);
+    }
+});
+test('an empty break in a shared edge prevents transitive propagation to distant aligned windows',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],near={},far={},farAcross={};c.gap=1;
+    const before={x:1,y:1,width:499,height:250},fixed={x:1,y:400,width:499,height:399},across={x:501,y:400,width:498,height:399};
+    arrange(c,m,[[w,before],[near,{x:501,y:1,width:498,height:250}],[far,fixed],[farAcross,across]]);
+    assert.equal(c.adjustRatio(w,before,{...before,width:599}),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(far)[1])},fixed);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(farAcross)[1])},across);
+});
+test('diagonally touching corners alone do not create a shared resize connection',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],diagonal={};c.gap=1;
+    const before={x:1,y:1,width:499,height:399},fixed={x:501,y:401,width:498,height:398};
+    arrange(c,m,[[w,before],[diagonal,fixed]]);
+    assert.equal(c.adjustRatio(w,before,{...before,width:599}),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(diagonal)[1])},fixed);
+});
+test('connected neighbors preview live without committing the tree, and Escape restores them',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],below=window(c);c.monitors.pop();c.gap=1;
+    const before={x:1,y:1,width:499,height:399},other={x:1,y:401,width:499,height:398};
+    arrange(c,m,[[w,before],[below,other]]);w.frameGeometry=before;below.frameGeometry=other;const tree=m.root;
+    w.move=false;w.interactiveMoveResizeStarted.emit();w.interactiveMoveResizeStepped.emit({...before,width:576});
+    assert.equal(below.frameGeometry.width,576);assert.equal(m.root,tree);assert.equal(c.resizePreviewWindows.size,1);
+    w.frameGeometry=before;w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
+    for(let i=0;i<10;i++)c.placeNextWindow();
+    assert.deepEqual({...below.frameGeometry},other);assert.equal(m.root,tree);assert.equal(c.resizePreviewWindows.size,0);
+});
+test('pausing mid-resize rolls back neighbor previews without changing the saved layout',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],below=window(c);c.monitors.pop();c.gap=1;
+    const before={x:1,y:1,width:499,height:399},other={x:1,y:401,width:499,height:398};
+    arrange(c,m,[[w,before],[below,other]]);w.frameGeometry=before;below.frameGeometry=other;const tree=m.root;
+    c.previewResizeNeighbors(w,before,{...before,width:576});assert.equal(below.frameGeometry.width,576);
+    c.setPaused(true);assert.deepEqual({...below.frameGeometry},other);assert.equal(m.root,tree);assert.equal(c.resizePreviewWindows.size,0);
+});
+test('returning to the original edge during a drag restores previews immediately',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],below=window(c);c.monitors.pop();c.gap=1;
+    const before={x:1,y:1,width:499,height:399},other={x:1,y:401,width:499,height:398};
+    arrange(c,m,[[w,before],[below,other]]);w.frameGeometry=before;below.frameGeometry=other;
+    c.previewResizeNeighbors(w,before,{...before,width:576});assert.equal(below.frameGeometry.width,576);
+    c.previewResizeNeighbors(w,before,before);assert.deepEqual({...below.frameGeometry},other);assert.equal(c.resizePreviewWindows.size,0);
+});
+test('guide removal cannot re-enter placement with the old tree during native resize release',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;c.apply();
+    const before={...w.frameGeometry},after={...before,width:before.width-99};
+    w.move=false;w.interactiveMoveResizeStarted.emit();w.frameGeometry=after;
+    // KWin emits windowRemoved synchronously when an overlay is hidden.
+    c.hidePreview=()=>c.apply();const requests=[],place=c.placeWindow;
+    c.placeWindow=(w,r)=>{requests.push({...r});place(w,r);};
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
+    assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},after);
+    assert.deepEqual({...w.frameGeometry},after);
+    assert.equal(requests.some(r=>r.width===before.width),false,'no stale pre-resize configure');
+    assert.equal(c.interactiveWindows.size,0);
+});
+test('removing an untracked overlay never triggers a retile; removing a managed client does',()=>{
+    const c=backend(),w=window(c);let applied=0;c.apply=()=>applied++;
+    c.removed({caption:'overlay',normalWindow:false});assert.equal(applied,0);assert.ok(c.slotOf(w));
+    c.removed(w);assert.equal(applied,1);assert.equal(c.slotOf(w),null);
+});
+test('a Wayland Escape frame arriving after Finished cancels the pending tree commit',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],below=window(c);c.monitors.pop();c.gap=1;
+    const before={x:1,y:1,width:499,height:399},other={x:1,y:401,width:499,height:398};
+    arrange(c,m,[[w,before],[below,other]]);w.frameGeometry=before;below.frameGeometry=other;const tree=m.root;
+    w.move=false;w.interactiveMoveResizeStarted.emit();w.interactiveMoveResizeStepped.emit({...before,width:576});
+    w.interactiveMoveResizeFinished.emit();
+    assert.equal(c.pendingResizeEnds.size,1);assert.equal(c.interactiveWindows.has(w),true);assert.equal(m.root,tree);
+    w.frameGeometry=before;c.completeResizeEnds();for(let i=0;i<10;i++)c.placeNextWindow();
+    assert.equal(m.root,tree);assert.deepEqual({...below.frameGeometry},other);assert.equal(c.pendingResizeEnds.size,0);
+    assert.equal(c.resizeFinishTimer.running,false);assert.equal(c.interactiveWindows.size,0);
+});
+test('quiescing disconnects every client callback before teardown and is idempotent',()=>{
+    const c=backend(),w=window(c);c.apply();
+    c.quiesce();c.quiesce();
+    assert.equal(c.enabled,false);assert.equal(c.windowConnections.size,0);
+    for(const s of ['frameGeometryChanged','interactiveMoveResizeStarted','interactiveMoveResizeStepped','interactiveMoveResizeFinished','minimizedChanged'])assert.equal(w[s].handlers.size,0);
+    assert.equal(c.pendingResizeEnds.size,0);assert.equal(c.interactiveWindows.size,0);assert.equal(c.placementQueue.length,0);
+    for(const t of ['placementDeadline','placementSpacing','resizeFinishTimer','recoveryTimer','workAreaTimer'])assert.equal(c[t].running,false);
+    w.interactiveMoveResizeStarted.emit();assert.equal(c.interactiveWindows.size,0);
+});
+test('production QML has scoped signal ownership and no destruction-time JavaScript callback',()=>{
+    const source=readFileSync(new URL('../src/linux/kwin.qml',`file://${__filename}`),'utf8');
+    assert.doesNotMatch(source,/^\s*Component\.onDestruction\s*:/m);
+    assert.doesNotMatch(source,/\.connect\(handlers\./);
+    assert.match(source,/windowObserver\.createObject\(root,/);
 });
 test('intentional small vacancies are not swallowed by the legacy five-percent collapse rule',()=>{
     const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;
@@ -568,9 +705,7 @@ test('quarter half and three-quarter snaps capture within six pixels and release
 });
 test('equal-size and aligned-edge snaps use other visible windows without resizing them',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],other={};c.gap=1;
-    c.splitSlot(m,m.root,'y',false,other);
-    const otherBefore=c.rects(m).get(c.slotOf(other)[1]);
-    c.adjustRatio(other,otherBefore,{...otherBefore,width:333});
+    arrange(c,m,[[w,{x:1,y:1,width:998,height:300}],[other,{x:1,y:400,width:333,height:399}]]);
     const before=c.rects(m).get(c.slotOf(w)[1]),after={...before,width:337};
     const hit=c.resizeSnap(w,before,after,['right']);
     assert.equal(hit.rect.width,333);assert.equal(hit.guides.length,1);
@@ -592,7 +727,7 @@ test('interactive resize snaps gently, releases with pointer movement, and Escap
     assert.equal(c.rectRight(w.frameGeometry),500);assert.equal(c.resizeGuide.visible,true);
     c.Workspace.cursorPos={x:510,y:100};w.frameGeometry={...before,width:509};w.interactiveMoveResizeStepped.emit(w.frameGeometry);
     assert.equal(c.resizeGuide.visible,false);assert.equal(c.rectRight(w.frameGeometry),510);
-    w.frameGeometry=before;w.interactiveMoveResizeFinished.emit();
+    w.frameGeometry=before;w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
     assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},before);assert.equal(c.resizeGuide.visible,false);
 });
 test('a delayed first Wayland frame does not cancel the resize and corners can acquire a second edge',()=>{
@@ -606,7 +741,7 @@ test('a delayed first Wayland frame does not cancel the resize and corners can a
     c.Workspace.cursorPos={x:c.rectRight(before)+30,y:c.rectBottom(before)+30};
     w.interactiveMoveResizeStepped.emit(w.frameGeometry);
     assert.equal(w.frameGeometry.height,before.height+30);
-    w.interactiveMoveResizeFinished.emit();
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
     assert.equal(c.rects(m).get(c.slotOf(w)[1]).height,before.height+30);
 });
 test('restarting adopts valid actual frames instead of replaying a stale default tree',()=>{
@@ -630,7 +765,7 @@ test('collision-limited resizing advances to a valid local edge instead of undoi
     const c=backend(),w=window(c),m=c.monitors[0],other={};c.gap=1;
     c.splitSlot(m,m.root,'x',false,other);
     const before=c.rects(m).get(c.slotOf(w)[1]),neighbor=c.rects(m).get(c.slotOf(other)[1]);
-    c.adjustRatio(w,before,{...before,width:before.width-100});
+    arrange(c,m,[[w,{...before,width:before.width-100}],[other,{...neighbor}]]);
     const start=c.rects(m).get(c.slotOf(w)[1]),raw={...start,width:start.width+250};
     const bounded=c.constrainedResize(w,start,raw);
     assert.ok(bounded.width>start.width+90);assert.ok(c.rectRight(bounded)+1<=neighbor.x);
@@ -670,7 +805,7 @@ test('panel changes do not interrupt a drag and are applied on completion',()=>{
     const before={...w.frameGeometry};w.interactiveMoveResizeStarted.emit();
     c.Workspace.clientArea=()=>({x:0,y:0,width:1000,height:760});
     c.workAreasChanged();assert.deepEqual({...w.frameGeometry},before);assert.equal(m.area.height,800);
-    w.interactiveMoveResizeFinished.emit();assert.equal(m.area.height,760);
+    w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();assert.equal(m.area.height,760);
     assert.equal(w.frameGeometry.height,740);
 });
 test('work-area refresh preserves other monitors and restores space when a panel leaves',()=>{
@@ -684,7 +819,7 @@ test('work-area refresh preserves other monitors and restores space when a panel
 test('pause stops placements and previews; resume retains the same layout',()=>{
     const c=backend(),w=window(c),m=c.monitors[0];c.apply();const tree=m.root;
     c.setPaused(true);w.move=true;w.interactiveMoveResizeStarted.emit();
-    w.frameGeometry={x:200,y:200,width:100,height:100};w.interactiveMoveResizeFinished.emit();
+    w.frameGeometry={x:200,y:200,width:100,height:100};w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
     assert.equal(w.frameGeometry.x,200);assert.equal(c.dragPreview.visible,false);
     c.setPaused(false);assert.equal(m.root,tree);assert.equal(w.frameGeometry.x,10);
 });

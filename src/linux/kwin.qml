@@ -30,6 +30,8 @@ Item {
     property int sequence: 1
     property var pendingSnapshot: null
     property var resizeGuides: []
+    property var resizePreviewWindows: new Map()
+    property var pendingResizeEnds: new Map()
     property bool displayTransition: false
     property int displayEpoch: 0
     property string displayFingerprint: ""
@@ -193,6 +195,8 @@ Item {
         placementDeadline.stop();placementSpacing.stop();
         placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
         interactiveWindows.clear();hidePreview();
+        resizePreviewWindows.clear();
+        pendingResizeEnds.clear();resizeFinishTimer.stop();
     }
     function commitDisplays(samples) {
         // Keep offline roots and window membership. Do not re-enroll those
@@ -315,6 +319,8 @@ Item {
         hidePreview(w);
         detach(w);floating.delete(w);identities.delete(w);expectedGeometry.delete(w);
         deferredPlacements.delete(w);interactiveWindows.delete(w);
+        resizePreviewWindows.delete(w);
+        pendingResizeEnds.delete(w);
         placementQueue=placementQueue.filter(p=>p.window!==w);
         if(currentPlacement&&currentPlacement.window===w)finishCurrentPlacement();
         if(focused===w)focused=null;
@@ -330,6 +336,13 @@ Item {
             }
         }
         return out.sort((a,b)=>Number(a.active)-Number(b.active));
+    }
+    function removed(w) {
+        const managed=!!slotOf(w)||floating.has(w)||pendingWindows.has(w);
+        disconnectWindow(w);vanished(w);
+        // Hiding a guide destroys its KWin surface synchronously. That is not
+        // a layout change, and must not queue the old layout during release.
+        if(managed)apply();
     }
     function placeWindow(w,r) {
         if(!displaysReady())return;
@@ -587,27 +600,39 @@ Item {
             const p=edgePosition(target,e),limit=edgePosition(bounds,e);
             setEdge(target,e,e==="left"||e==="top"?Math.max(limit,p):Math.min(limit,p));
         }
-        // Only a directly adjacent window may share a resize. All other windows
-        // remain fixed, even when they used to share an ancestor split.
+        // Follow the continuous geometric edge, not an ancestor split. Both
+        // sides participate, including aligned windows immediately above/below
+        // (or beside a horizontal edge). Empty stretches break the connection.
         for(const e of edges) {
             const horizontal=e==="left"||e==="right",leading=e==="left"||e==="top";
             const opposite=e==="left"?"right":e==="right"?"left":e==="top"?"bottom":"top";
-            for(const item of items) {
-                if(item.slot===slot)continue;
-                const r=item.rect,old=map.get(item.slot);
-                const overlap=horizontal?Math.min(rectBottom(before),rectBottom(old))-Math.max(before.y,old.y):Math.min(rectRight(before),rectRight(old))-Math.max(before.x,old.x);
-                const adjacent=overlap>0&&Math.abs(edgePosition(old,opposite)-edgePosition(before,e)-(leading?-gap:gap))<=2;
-                if(!adjacent||!intersects(target,r,gap))continue;
-                const min=minimumSize(item.slot),size=Math.max(1,horizontal?min.width:min.height);
-                const limit=leading?edgePosition(old,e)+size+gap:edgePosition(old,e)-size-gap;
-                setEdge(target,e,leading?Math.max(edgePosition(target,e),limit):Math.min(edgePosition(target,e),limit));
+            const position=edgePosition(before,e),offset=leading?-gap:gap;
+            const segments=[{low:horizontal?before.y:before.x,high:horizontal?rectBottom(before):rectRight(before),side:0}];
+            const candidates=items.filter(item=>item.slot!==slot).map(item=>{
+                const old=map.get(item.slot),same=Math.abs(edgePosition(old,e)-position)<=2;
+                const across=Math.abs(edgePosition(old,opposite)-position-offset)<=2;
+                return {item,old,edge:same?e:opposite,offset:same?0:offset,side:same?0:1,aligned:same||across,
+                    low:horizontal?old.y:old.x,high:horizontal?rectBottom(old):rectRight(old)};
+            }).filter(c=>c.aligned);
+            const connected=[];
+            let changed=true;
+            while(changed) {
+                changed=false;
+                for(const c of candidates)if(!connected.includes(c)&&segments.some(s=>
+                    Math.min(c.high,s.high)-Math.max(c.low,s.low)>=(c.side===s.side?-gap:1))) {
+                    connected.push(c);segments.push(c);changed=true;
+                }
             }
-            for(const item of items) {
-                if(item.slot===slot)continue;
-                const r=item.rect,old=map.get(item.slot);
-                const overlap=horizontal?Math.min(rectBottom(before),rectBottom(old))-Math.max(before.y,old.y):Math.min(rectRight(before),rectRight(old))-Math.max(before.x,old.x);
-                if(overlap>0&&Math.abs(edgePosition(old,opposite)-edgePosition(before,e)-(leading?-gap:gap))<=2&&intersects(target,r,gap))setEdge(r,opposite,edgePosition(target,e)+(leading?-gap:gap));
+            let p=edgePosition(target,e);
+            for(const c of connected) {
+                const min=minimumSize(c.item.slot),size=Math.max(1,horizontal?min.width:min.height);
+                const near=c.edge==="left"||c.edge==="top";
+                const limit=(near?edgePosition(c.old,horizontal?"right":"bottom")-size:
+                    edgePosition(c.old,horizontal?"left":"top")+size)-c.offset;
+                p=near?Math.min(p,limit):Math.max(p,limit);
             }
+            setEdge(target,e,p);
+            for(const c of connected)setEdge(c.item.rect,c.edge,p+c.offset);
         }
         items.find(i=>i.slot===slot).rect=target;
         for(let i=0;i<items.length;i++) {
@@ -634,6 +659,45 @@ Item {
     function adjustRatio(w,before,after) {
         const plan=resizeLayout(w,before,after);if(!plan)return false;
         plan.monitor.root=plan.tree;return true;
+    }
+    function restoreResizePreview() {
+        const ready=!dryRun&&displaysReady();
+        for(const [w,r] of resizePreviewWindows)if(ready&&tileable(w)&&visibleHere(w)&&!geometryMatches(windowRect(w),r))placeWindow(w,r);
+        resizePreviewWindows.clear();
+    }
+    function completeResizeEnds() {
+        resizeFinishTimer.stop();
+        for(const [w,d] of pendingResizeEnds) {
+            if(enabled&&!paused&&displaysReady()&&d.epoch===displayEpoch&&tileable(w)) {
+                const final=windowRect(w);
+                if(!geometryMatches(final,d.rect)) {
+                    const bounded=constrainedResize(w,d.rect,d.raw||final);
+                    const snap=resizeSnap(w,d.rect,bounded,d.edges.length?d.edges:resizeEdges(d.rect,final));
+                    adjustRatio(w,d.rect,snap.rect);
+                }
+            }
+            interactiveWindows.delete(w);
+        }
+        pendingResizeEnds.clear();resizePreviewWindows.clear();apply();
+    }
+    function previewResizeNeighbors(w,before,after) {
+        if(dryRun)return;
+        const plan=resizeLayout(w,before,after);
+        if(!plan){restoreResizePreview();return;}
+        const desired=new Map(),old=rects(plan.monitor),next=new Map();compute(plan.tree,inset(plan.monitor.area),next);
+        for(const s of leaves(plan.tree)) {
+            if(s.windows.includes(w)||!s.windows.length)continue;
+            const original=slotOf(s.windows[0]);if(!original||geometryMatches(old.get(original[1]),next.get(s),0))continue;
+            for(const other of s.windows)if(visibleHere(other)&&!floating.has(other))desired.set(other,next.get(s));
+        }
+        for(const [other,r] of resizePreviewWindows)if(!desired.has(other)) {
+            if(tileable(other)&&visibleHere(other)&&!geometryMatches(windowRect(other),r))placeWindow(other,r);
+            resizePreviewWindows.delete(other);
+        }
+        for(const [other,r] of desired) {
+            if(!resizePreviewWindows.has(other))resizePreviewWindows.set(other,windowRect(other));
+            if(!geometryMatches(windowRect(other),r))placeWindow(other,r);
+        }
     }
     function constrainedResize(w,before,after) {
         const plan=resizeLayout(w,before,after);if(plan)return plan.rect;
@@ -736,6 +800,8 @@ Item {
             }
         };
         handlers.started=()=>{
+            if(pendingResizeEnds.size)completeResizeEnds();
+            restoreResizePreview();
             hidePreview();
             if(!displaysReady()){drag=null;return;}
             interactiveWindows.add(w);
@@ -765,6 +831,7 @@ Item {
                 drag.raw=raw;
                 const bounded=constrainedResize(w,drag.rect,raw),snap=resizeSnap(w,drag.rect,bounded,drag.edges);
                 showResizeGuide(w,snap);
+                previewResizeNeighbors(w,drag.rect,snap.rect);
                 // The cursor remains free; each step is measured from its original
                 // position, never from the last snapped client geometry.
                 if(!geometryMatches(windowRect(w),snap.rect,0)&&!dryRun)w.frameGeometry=snap.rect;
@@ -777,48 +844,32 @@ Item {
             showPreview(w,r,empty?hit[2]:null,z);
         };
         handlers.finished=()=>{
-            interactiveWindows.delete(w);
-            hidePreview(w);if(!drag||paused||!displaysReady()||drag.epoch!==displayEpoch){drag=null;apply();return;}
+            // Keep the interactive guard until the new tree is committed:
+            // hiding overlays can re-enter us through Workspace signals.
+            hidePreview(w);if(!drag||paused||!displaysReady()||drag.epoch!==displayEpoch){drag=null;interactiveWindows.delete(w);restoreResizePreview();apply();return;}
             const d=drag;drag=null;
             // KWin restores the starting geometry before emitting Finished when
             // Escape cancels a drag. The cursor can still be over another slot.
             if(d.moving) {
                 if(!geometryMatches(windowRect(w),d.rect))drop(w,Workspace.cursorPos,false);
             } else {
-                const final=windowRect(w);
-                // Escape restores the initial geometry: do not commit the last guide.
-                if(!geometryMatches(final,d.rect)) {
-                    const bounded=constrainedResize(w,d.rect,d.raw||final);
-                    const snap=resizeSnap(w,d.rect,bounded,d.edges.length?d.edges:resizeEdges(d.rect,final));
-                    adjustRatio(w,d.rect,snap.rect);
-                }
+                // Wayland can report Finished before the client's Escape restore
+                // frame arrives. Keep the guard and provisional neighbors until
+                // that final configure has had a chance to commit.
+                pendingResizeEnds.set(w,d);resizeFinishTimer.restart();return;
             }
-            apply();
+            resizePreviewWindows.clear();interactiveWindows.delete(w);apply();
         };
         handlers.minimized=()=>{apply();};
-        w.frameGeometryChanged.connect(handlers.geometry);
-        w.interactiveMoveResizeStarted.connect(handlers.started);
-        w.interactiveMoveResizeStepped.connect(handlers.stepped);
-        w.interactiveMoveResizeFinished.connect(handlers.finished);
-        w.minimizedChanged.connect(handlers.minimized);
-        w.maximizedChanged.connect(handlers.minimized);
-        w.fullScreenChanged.connect(handlers.minimized);
-        w.desktopsChanged.connect(handlers.minimized);
-        w.activitiesChanged.connect(handlers.minimized);
+        // QObject-scoped connections are disconnected by Qt before their QML
+        // context disappears. Bare signal.connect(JS closure) can outlive it.
+        handlers.observer=windowObserver.createObject(root,{target:w,handlers});
         windowConnections.set(w,handlers);
     }
     function disconnectWindow(w) {
         const h=windowConnections.get(w);if(!h)return;
-        try { w.frameGeometryChanged.disconnect(h.geometry); } catch(e) {}
-        try { w.interactiveMoveResizeStarted.disconnect(h.started); } catch(e) {}
-        try { w.interactiveMoveResizeStepped.disconnect(h.stepped); } catch(e) {}
-        try { w.interactiveMoveResizeFinished.disconnect(h.finished); } catch(e) {}
-        try { w.minimizedChanged.disconnect(h.minimized); } catch(e) {}
-        try { w.maximizedChanged.disconnect(h.minimized); } catch(e) {}
-        try { w.fullScreenChanged.disconnect(h.minimized); } catch(e) {}
-        try { w.desktopsChanged.disconnect(h.minimized); } catch(e) {}
-        try { w.activitiesChanged.disconnect(h.minimized); } catch(e) {}
         windowConnections.delete(w);
+        h.observer.target=null;h.observer.destroy();
     }
     function stackAtCursor() {
         if(paused)return;
@@ -830,8 +881,19 @@ Item {
         const found=slotOf(w);if(!found||found[1].windows.length<2)return false;
         detach(w);appeared(w);apply();return true;
     }
+    function quiesce() {
+        if(!enabled)return;
+        // Detach event sources before hiding surfaces or restoring clients.
+        // All cleanup runs while the QML context is alive, never in destruction.
+        enabled=false;
+        for(const w of Array.from(windowConnections.keys()))disconnectWindow(w);
+        restoreResizePreview();
+        pendingResizeEnds.clear();resizeFinishTimer.stop();
+        placementDeadline.stop();placementSpacing.stop();recoveryTimer.stop();workAreaTimer.stop();
+        interactiveWindows.clear();expectedGeometry.clear();deferredPlacements.clear();placementQueue=[];currentPlacement=null;hidePreview();
+    }
     function stop() {
-        enabled=false;placementDeadline.stop();placementSpacing.stop();recoveryTimer.stop();workAreaTimer.stop();hidePreview();
+        quiesce();
         unloadCall.service="org.kde.KWin";
         unloadCall.path="/Scripting";
         unloadCall.method="unloadScript";
@@ -839,6 +901,7 @@ Item {
         unloadCall.call();
     }
     function setPaused(value) {
+        if(value){restoreResizePreview();for(const w of pendingResizeEnds.keys())interactiveWindows.delete(w);pendingResizeEnds.clear();resizeFinishTimer.stop();}
         paused=value;hidePreview();placementDeadline.stop();placementSpacing.stop();
         placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
         if(!paused)apply();
@@ -927,15 +990,29 @@ Item {
     }
 
     Component.onCompleted: start()
-    Component.onDestruction: {
-        placementDeadline.stop();placementSpacing.stop();recoveryTimer.stop();workAreaTimer.stop();hidePreview();
-        for(const w of Array.from(windowConnections.keys())) disconnectWindow(w);
+    // No JavaScript in Component.onDestruction: Qt can already be invalidating
+    // the context at that point. Timers and scoped Connections die with root.
+    Component {
+        id: windowObserver
+        Connections {
+            property var handlers
+            enabled: root.enabled
+            function onFrameGeometryChanged() { handlers.geometry(); }
+            function onInteractiveMoveResizeStarted() { handlers.started(); }
+            function onInteractiveMoveResizeStepped(geometry) { handlers.stepped(geometry); }
+            function onInteractiveMoveResizeFinished() { handlers.finished(); }
+            function onMinimizedChanged() { handlers.minimized(); }
+            function onMaximizedChanged() { handlers.minimized(); }
+            function onFullScreenChanged() { handlers.minimized(); }
+            function onDesktopsChanged() { handlers.minimized(); }
+            function onActivitiesChanged() { handlers.minimized(); }
+        }
     }
 
     Connections {
-        target: Workspace
+        target: root.enabled ? Workspace : null
         function onWindowAdded(w) { root.connectWindow(w);if(root.appeared(w))root.apply(); }
-        function onWindowRemoved(w) { root.disconnectWindow(w);root.vanished(w);root.apply(); }
+        function onWindowRemoved(w) { root.removed(w); }
         function onWindowActivated(w) { if(w){if(root.appeared(w))root.apply();root.focused=w;const f=root.slotOf(w);if(f)f[1].active=f[1].windows.indexOf(w);} }
         function onScreensChanged() { root.beginDisplayTransition(); }
         function onCurrentDesktopChanged() { root.apply(); }
@@ -943,6 +1020,7 @@ Item {
     }
 
     Timer { id: placementDeadline; interval: 1000; repeat: false; onTriggered: root.placementTimedOut() }
+    Timer { id: resizeFinishTimer; interval: 150; repeat: false; onTriggered: root.completeResizeEnds() }
     Timer { id: placementSpacing; interval: 100; repeat: false; onTriggered: root.placeNextWindow() }
     Timer { id: recoveryTimer; interval: 5000; running: !root.dryRun; repeat: true; onTriggered: root.retryDeferredPlacements() }
     // KWin's scripting API has no work-area-changed signal. Panel visibility,

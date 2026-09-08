@@ -60,15 +60,18 @@ LEFT│ ←    CENTER   → │RIGHT      Center → swap (Ctrl+Center → stack
 Closing a window leaves its slot **empty**; the next window you open takes the most recently
 emptied slot, so nothing else moves. `Super+Shift+K` compacts when *you* decide.
 
-On **Plasma Wayland**, edge resizing recuts the local space: unrelated windows retain their
-rectangles, while a directly touching neighbor can shrink to accommodate the shared edge.
-Shrinking a window creates reusable empty space, including when it fills the monitor.
+On **Plasma Wayland**, resizing follows the connected shared edge. Aligned windows immediately
+below/above a vertical edge (or beside a horizontal edge) stay aligned, and windows across it
+grow or shrink as you drag. Unrelated windows retain their rectangles: an empty stretch breaks
+the connection, and matching coordinates or an old ancestor split alone do not link windows.
+Shrinking an unshared edge creates reusable empty space, including for a monitor-filling window.
 Faint alignment guides and a **6-logical-pixel** snap range help match quarter/half/three-quarter
 positions in the work area or available space, other window edges, and equal widths/heights.
 Drag more than 6 pixels past a target to override it; Escape cancels the gesture. Snaps respect
 application minimum sizes and panel work areas. When a collision or layout constraint prevents
 further growth, the edge stops at the last valid local position rather than moving distant windows.
 An already valid non-overlapping desktop layout is retained when the Plasma runtime restarts.
+See [connected-edge verification](docs/verification-0.2.5.md) for behavior and test coverage.
 
 Windows and X11 currently retain the original shared-divider resize behavior; these new local
 resize and alignment-guide features are Plasma-specific.
@@ -175,6 +178,13 @@ node --test tests/kwin.test.cjs
 The JavaScript tests execute the actual QML backend functions with a mock compositor, covering
 sleep/wake reconciliation, asynchronous and synchronous resize completion, interrupted drags,
 nested splits, window removal, and windows that should be left alone.
+
+For compositor lifecycle testing, prefer `node tests/plasma-isolated.cjs`. It starts a private
+headless KWin with its own D-Bus session, runtime/configuration directories, and software
+renderer; it does not use your desktop's display socket or inject global input. A development
+live-test sequence did crash KWin and disrupt the desktop. See the
+[crash and verification record](docs/verification-0.2.5.md). Run the live-desktop harnesses
+below only in a disposable session; do not use them to stress-test a working desktop.
 
 With Tilekeep running on Plasma, `python tests/tray-live.py --allow-settings-changes` exercises
 real tray callbacks for pause, gap, login startup, and snapshot save/load/startup selection.

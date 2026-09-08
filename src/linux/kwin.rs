@@ -132,7 +132,19 @@ pub fn run(options: Options) -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(500));
     }
-    let _ = scripting(&["unloadScript", PLUGIN]);
+    if script_loaded() {
+        // Quiesce while the QML context is alive. The scoped QObject connections
+        // also make direct teardown safe if the shortcut service is unavailable.
+        let _ = Command::new("qdbus6")
+            .args([
+                "org.kde.kglobalaccel",
+                "/component/kwin",
+                "org.kde.kglobalaccel.Component.invokeShortcut",
+                "TilekeepQuit",
+            ])
+            .output();
+        let _ = scripting(&["unloadScript", PLUGIN]);
+    }
     Ok(())
 }
 
