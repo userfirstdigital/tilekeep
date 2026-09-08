@@ -6,6 +6,7 @@ pub mod control;
 pub mod engine;
 pub mod geometry;
 pub mod settings;
+mod snapshot_dialog;
 pub mod snapshots;
 pub mod tray;
 pub mod tree;

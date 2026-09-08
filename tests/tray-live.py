@@ -5,6 +5,7 @@ import pathlib
 import time
 import os
 import dbus
+from datetime import datetime
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--allow-settings-changes',action='store_true')
@@ -63,10 +64,11 @@ try:
     saved=after-before;check(len(saved)==1,'tray saves a real snapshot')
     snapshot=saved.pop();data=json.loads(snapshot.read_text())
     check(bool(data['windows']) and bool(data['monitors']),'snapshot contains applications and layout')
-    click('4 px');click('Snapshot '+snapshot.stem,'Load snapshot')
+    snapshot_label='Snapshot — '+datetime.fromtimestamp(int(snapshot.stem.split('-')[0])/1000).strftime('%Y-%m-%d %H:%M:%S')
+    click('4 px');click(snapshot_label,'Load snapshot')
     check(settings()['gap']==1,'loading snapshot restores its saved gap')
     check('running' in str(props.Get('org.kde.StatusNotifierItem','Title')),'snapshot restoration completed')
-    click('Snapshot '+snapshot.stem,'Snapshot at startup')
+    click(snapshot_label,'Snapshot at startup')
     check(settings()['startup_snapshot']==snapshot.stem,'startup snapshot selection persists')
     click('None','Snapshot at startup');check(settings()['startup_snapshot'] is None,'startup snapshot can be disabled')
     click('Check for updates')

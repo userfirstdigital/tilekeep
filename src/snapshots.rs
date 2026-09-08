@@ -44,6 +44,8 @@ pub struct Monitor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub schema: u32,
+    #[serde(default)]
+    pub name: String,
     pub gap: i32,
     pub monitors: Vec<Monitor>,
     pub windows: Vec<AppWindow>,
@@ -51,26 +53,93 @@ pub struct Snapshot {
 fn directory() -> Result<PathBuf, String> {
     Ok(crate::settings::config_dir()?.join("snapshots"))
 }
-fn path(id: &str) -> Result<PathBuf, String> {
+fn path_in(dir: &std::path::Path, id: &str) -> Result<PathBuf, String> {
     if id.is_empty() || id.len() > 80 || !id.chars().all(|c| c.is_ascii_digit() || c == '-') {
         return Err("Invalid snapshot ID".into());
     }
-    Ok(directory()?.join(format!("{id}.json")))
+    Ok(dir.join(format!("{id}.json")))
 }
-pub fn list() -> Vec<String> {
-    let mut ids = directory()
+fn path(id: &str) -> Result<PathBuf, String> {
+    path_in(&directory()?, id)
+}
+#[derive(Clone, Debug)]
+pub struct Entry {
+    pub id: String,
+    pub name: String,
+}
+impl Entry {
+    pub fn label(&self) -> String {
+        let date = self
+            .id
+            .split('-')
+            .next()
+            .and_then(|s| s.parse::<i64>().ok())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "Unknown date".into());
+        format!("{} — {date}", if self.name.is_empty() { "Snapshot" } else { &self.name })
+    }
+}
+pub fn list() -> Vec<Entry> {
+    directory().map(|d| list_in(&d)).unwrap_or_default()
+}
+fn list_in(dir: &std::path::Path) -> Vec<Entry> {
+    let mut entries = std::fs::read_dir(dir)
         .ok()
-        .and_then(|d| std::fs::read_dir(d).ok())
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && e.path().extension().is_some_and(|s| s == "json"))
         .filter_map(|e| e.path().file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .filter(|id| path(id).is_ok())
+        .filter_map(|id| load_path(&path_in(dir, &id).ok()?).ok().map(|s| Entry { id, name: s.name }))
         .collect::<Vec<_>>();
-    ids.sort();
-    ids.reverse();
-    ids.truncate(40);
-    ids
+    entries.sort_by(|a, b| b.id.cmp(&a.id));
+    entries
+}
+pub(crate) fn valid_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err("Use a name of 1–80 characters, without line breaks or control characters".into());
+    }
+    Ok(name.into())
+}
+pub fn rename(id: &str, name: &str) -> Result<(), String> {
+    rename_in(&directory()?, id, name)
+}
+fn rename_in(dir: &std::path::Path, id: &str, name: &str) -> Result<(), String> {
+    let name = valid_name(name)?;
+    let p = path_in(dir, id)?;
+    load_path(&p)?;
+    // Preserve unknown fields and the exact saved geometry when editing metadata.
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&p).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    value["name"] = name.into();
+    crate::settings::atomic_write(&p, &serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?)
+}
+pub fn delete(id: &str, settings_path: &std::path::Path) -> Result<(), String> {
+    delete_in(&directory()?, id, settings_path)
+}
+fn delete_in(dir: &std::path::Path, id: &str, settings_path: &std::path::Path) -> Result<(), String> {
+    let p = path_in(dir, id)?;
+    load_path(&p)?;
+    let mut settings = crate::settings::load(settings_path)?;
+    // Archive first. If updating startup settings fails, put the snapshot back.
+    let deleted = dir.join("deleted");
+    std::fs::create_dir_all(&deleted).map_err(|e| e.to_string())?;
+    let dest = path_in(&deleted, id)?;
+    if dest.exists() {
+        return Err("A deleted snapshot with this ID already exists".into());
+    }
+    std::fs::rename(&p, &dest).map_err(|e| e.to_string())?;
+    if settings.startup_snapshot.as_deref() == Some(id) {
+        settings.startup_snapshot = None;
+        if let Err(e) = crate::settings::save(settings_path, &settings) {
+            std::fs::rename(&dest, &p)
+                .map_err(|rollback| format!("{e}; snapshot remains in deleted folder: {rollback}"))?;
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 pub fn validate(s: &Snapshot) -> Result<(), String> {
     fn node(n: &Node, depth: usize, tokens: &HashSet<&str>, used: &mut HashSet<String>) -> bool {
@@ -95,6 +164,7 @@ pub fn validate(s: &Snapshot) -> Result<(), String> {
     let tokens = s.windows.iter().map(|w| w.token.as_str()).collect::<HashSet<_>>();
     let mut used = HashSet::new();
     if s.schema != 1
+        || (!s.name.is_empty() && valid_name(&s.name).is_err())
         || !(0..=64).contains(&s.gap)
         || s.windows.len() > 256
         || tokens.len() != s.windows.len()
@@ -131,7 +201,10 @@ pub fn save(snapshot: Snapshot) -> Result<String, String> {
 }
 pub fn load(id: &str) -> Result<Snapshot, String> {
     let path = path(id)?;
-    if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > 2 * 1024 * 1024 {
+    load_path(&path)
+}
+fn load_path(path: &std::path::Path) -> Result<Snapshot, String> {
+    if std::fs::metadata(path).map_err(|e| e.to_string())?.len() > 2 * 1024 * 1024 {
         return Err("Snapshot exceeds size limit".into());
     }
     let snapshot =
@@ -273,6 +346,109 @@ pub fn bridge() -> Result<zbus::blocking::Connection, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture(dir: &std::path::Path, id: &str) -> PathBuf {
+        let p = path_in(dir, id).unwrap();
+        std::fs::write(&p, r#"{"schema":1,"gap":1,"windows":[],"monitors":[{"name":"test","area":{"x":0,"y":0,"w":100,"h":100},"root":{"kind":"leaf","windows":[]}}],"future":{"keep":true}}"#).unwrap();
+        p
+    }
+    #[test]
+    fn legacy_snapshot_gets_date_and_rename_preserves_identity_layout_and_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "1788898432453";
+        let p = fixture(dir.path(), id);
+        let entries = list_in(dir.path());
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].name.is_empty());
+        assert!(entries[0].label().starts_with("Snapshot — 2026-09-"));
+        let mut before: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        rename_in(dir.path(), id, "  Work & café '$`  ").unwrap();
+        let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        before["name"] = "Work & café '$`".into();
+        assert_eq!(before, after);
+        let entries = list_in(dir.path());
+        assert_eq!(entries[0].id, id);
+        assert!(entries[0].label().starts_with("Work & café '$` — 2026-09-"));
+    }
+    #[test]
+    fn invalid_names_do_not_change_saved_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fixture(dir.path(), "123");
+        let before = std::fs::read(&p).unwrap();
+        for bad in ["".into(), "  ".into(), "x\ny".into(), "x\0y".into(), "a".repeat(81)] {
+            assert!(rename_in(dir.path(), "123", &bad).is_err());
+            assert_eq!(std::fs::read(&p).unwrap(), before);
+        }
+        assert!(rename_in(dir.path(), "../123", "test").is_err());
+        assert!(rename_in(dir.path(), "456", "test").is_err());
+        assert_eq!(valid_name(&"é".repeat(80)).unwrap().chars().count(), 80);
+    }
+    #[test]
+    fn delete_archives_exact_file_clears_startup_and_leaves_other_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fixture(dir.path(), "123");
+        fixture(dir.path(), "456");
+        let before = std::fs::read(&p).unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let settings = crate::settings::Settings { startup_snapshot: Some("123".into()), gap: 4, ..Default::default() };
+        crate::settings::save(&settings_path, &settings).unwrap();
+        delete_in(dir.path(), "123", &settings_path).unwrap();
+        assert!(!p.exists());
+        assert_eq!(std::fs::read(dir.path().join("deleted/123.json")).unwrap(), before);
+        let current = crate::settings::load(&settings_path).unwrap();
+        assert!(current.startup_snapshot.is_none());
+        assert_eq!(current.gap, 4);
+        assert_eq!(list_in(dir.path()).iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["456"]);
+        assert!(delete_in(dir.path(), "123", &settings_path).is_err());
+    }
+    #[test]
+    fn delete_preserves_different_startup_and_refuses_archive_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = fixture(dir.path(), "123");
+        let settings_path = dir.path().join("settings.json");
+        let settings = crate::settings::Settings { startup_snapshot: Some("456".into()), ..Default::default() };
+        crate::settings::save(&settings_path, &settings).unwrap();
+        delete_in(dir.path(), "123", &settings_path).unwrap();
+        assert_eq!(crate::settings::load(&settings_path).unwrap(), settings);
+        fixture(dir.path(), "123");
+        assert!(delete_in(dir.path(), "123", &settings_path).is_err());
+        assert!(p.exists());
+        assert!(delete_in(dir.path(), "../123", &settings_path).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn settings_write_failure_restores_archived_snapshot() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = fixture(dir.path(), "123");
+        let settings_dir = dir.path().join("config");
+        let settings_path = settings_dir.join("settings.json");
+        let settings = crate::settings::Settings { startup_snapshot: Some("123".into()), ..Default::default() };
+        crate::settings::save(&settings_path, &settings).unwrap();
+        std::fs::set_permissions(&settings_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = delete_in(dir.path(), "123", &settings_path);
+        std::fs::set_permissions(&settings_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        } // root bypasses directory write permissions
+        assert!(result.is_err());
+        assert!(p.exists());
+        assert!(!dir.path().join("deleted/123.json").exists());
+        assert_eq!(crate::settings::load(&settings_path).unwrap(), settings);
+    }
+    #[test]
+    fn listing_excludes_invalid_files_directories_and_archives_without_hiding_old_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 100..145 {
+            fixture(dir.path(), &i.to_string());
+        }
+        std::fs::create_dir(dir.path().join("500.json")).unwrap();
+        std::fs::write(dir.path().join("600.json"), "broken").unwrap();
+        std::fs::write(dir.path().join("700.backup"), "ignored").unwrap();
+        let entries = list_in(dir.path());
+        assert_eq!(entries.len(), 45);
+        assert_eq!(entries[0].id, "144");
+        assert_eq!(entries[44].id, "100");
+    }
     #[test]
     fn native_snapshot_restores_tree_with_new_handles_and_keeps_extra_windows() {
         use crate::{
@@ -323,6 +499,7 @@ mod tests {
     fn malformed_snapshot_nodes_are_rejected() {
         let mut s = Snapshot {
             schema: 1,
+            name: String::new(),
             gap: 1,
             windows: vec![],
             monitors: vec![Monitor {

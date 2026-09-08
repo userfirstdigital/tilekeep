@@ -32,6 +32,11 @@ but it does not replace itself. Login startup and loading a startup snapshot are
 **Snapshots:** choose **Save snapshot now**, then select it from **Load snapshot** or
 **Snapshot at startup**. Saved layouts match existing windows and launch missing applications;
 extra windows remain open. Exact placement requires the same monitors and available work area.
+Snapshot menus show the name and original creation date/time in your local timezone, including
+older snapshots. Use **Edit snapshots → [snapshot] → Rename… / Delete…** to manage them.
+Renaming preserves the layout and startup selection. Delete asks for confirmation, disables
+startup loading if needed, and moves the saved file to `snapshots/deleted` for recovery;
+it never closes applications. Linux name/confirmation dialogs use `kdialog` (Plasma) or `zenity`.
 Document contents/browser tabs are the application's responsibility, not included in snapshots.
 Missing apps are relaunched from their saved executable, without replaying command-line arguments.
 Apps that require a launcher or do not reopen multiple windows themselves may need manual reopening.

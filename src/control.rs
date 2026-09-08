@@ -19,6 +19,8 @@ pub enum Action {
     OpenSettings,
     SaveSnapshot,
     LoadSnapshot(String),
+    RenameSnapshot(String),
+    DeleteSnapshot(String),
     StartupSnapshot(Option<String>),
     Quit,
 }
@@ -40,7 +42,7 @@ pub struct State {
     pub autostart: bool,
     pub status: String,
     pub update: String,
-    pub snapshots: Vec<String>,
+    pub snapshots: Vec<crate::snapshots::Entry>,
 }
 pub struct Controller {
     state: Mutex<State>,
@@ -49,6 +51,7 @@ pub struct Controller {
     path: PathBuf,
     exe: PathBuf,
     _lock: File,
+    dialog_open: std::sync::atomic::AtomicBool,
 }
 static INSTANCE: OnceLock<Arc<Controller>> = OnceLock::new();
 impl Controller {
@@ -86,6 +89,7 @@ impl Controller {
             path,
             exe,
             _lock: lock,
+            dialog_open: std::sync::atomic::AtomicBool::new(false),
         });
         INSTANCE.set(c.clone()).map_err(|_| "Controller already initialized")?;
         Ok(c)
@@ -122,6 +126,7 @@ impl Controller {
         }
     }
     fn handle(self: &Arc<Self>, action: Action) -> Result<(), String> {
+        let delete_snapshot = matches!(action, Action::DeleteSnapshot(_));
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let command = match action {
             Action::Pause => {
@@ -137,6 +142,13 @@ impl Controller {
                 crate::snapshots::load(&id)?;
                 *self.requested.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
                 Some(Command::LoadSnapshot(id))
+            }
+            Action::RenameSnapshot(id) | Action::DeleteSnapshot(id) => {
+                let entry = state.snapshots.iter().find(|s| s.id == id).cloned().ok_or("Snapshot no longer exists")?;
+                let startup = state.settings.startup_snapshot.as_deref() == Some(&id);
+                drop(state);
+                self.snapshot_dialog(entry, startup, delete_snapshot)?;
+                return Ok(());
             }
             Action::StartupSnapshot(id) => {
                 if let Some(id) = &id {
@@ -191,6 +203,56 @@ impl Controller {
         };
         if let Some(command) = command {
             self.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(command);
+        }
+        Ok(())
+    }
+    fn snapshot_dialog(
+        self: &Arc<Self>,
+        entry: crate::snapshots::Entry,
+        startup: bool,
+        delete: bool,
+    ) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+        if self.dialog_open.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let c = self.clone();
+        if let Err(e) = std::thread::Builder::new().name("snapshot-dialog".into()).spawn(move || {
+            let result = (|| {
+                if delete {
+                    if !crate::snapshot_dialog::delete(&entry, startup)? {
+                        return Ok(());
+                    }
+                    // Serialize metadata/settings changes, but never hold this lock during a dialog.
+                    let mut s = c.state.lock().unwrap_or_else(|e| e.into_inner());
+                    crate::snapshots::delete(&entry.id, &c.path)?;
+                    if s.settings.startup_snapshot.as_deref() == Some(&entry.id) {
+                        s.settings.startup_snapshot = None;
+                    }
+                    c.queue
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .retain(|cmd| !matches!(cmd, Command::LoadSnapshot(id) if id == &entry.id));
+                    let mut requested = c.requested.lock().unwrap_or_else(|e| e.into_inner());
+                    if requested.as_deref() == Some(&entry.id) {
+                        *requested = None;
+                    }
+                    s.snapshots = crate::snapshots::list();
+                    s.status = "Snapshot deleted (recoverable in snapshots/deleted)".into();
+                } else if let Some(name) = crate::snapshot_dialog::rename(&entry)? {
+                    crate::snapshots::rename(&entry.id, &name)?;
+                    c.snapshots_changed("Snapshot renamed");
+                }
+                Ok::<_, String>(())
+            })();
+            if let Err(e) = result {
+                c.status(&format!("Error: {e}"));
+                log::warn!("Snapshot edit: {e}");
+            }
+            c.dialog_open.store(false, Ordering::SeqCst);
+        }) {
+            self.dialog_open.store(false, Ordering::SeqCst);
+            return Err(e.to_string());
         }
         Ok(())
     }

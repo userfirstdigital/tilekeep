@@ -1,6 +1,10 @@
 use crate::control::{Action, Controller, State};
 use std::{cell::RefCell, sync::Arc};
 const GAPS: [i32; 9] = [0, 1, 2, 4, 6, 8, 10, 16, 32];
+fn snapshot_label(entry: &crate::snapshots::Entry) -> String {
+    // Native menus interpret ampersands as keyboard mnemonics.
+    entry.label().replace('&', "&&")
+}
 fn title(s: &State) -> String {
     format!("Tilekeep — tiling window manager ({})", if s.paused { "paused" } else { &s.status })
 }
@@ -131,7 +135,28 @@ impl ksni::Tray for LinuxMenu {
                 submenu: s
                     .snapshots
                     .iter()
-                    .map(|id| Self::item(&format!("Snapshot {id}"), Action::LoadSnapshot(id.clone())))
+                    .map(|e| Self::item(&snapshot_label(e), Action::LoadSnapshot(e.id.clone())))
+                    .collect(),
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: "Edit snapshots".into(),
+                enabled: !s.snapshots.is_empty(),
+                submenu: s
+                    .snapshots
+                    .iter()
+                    .map(|e| {
+                        SubMenu {
+                            label: snapshot_label(e),
+                            submenu: vec![
+                                Self::item("Rename…", Action::RenameSnapshot(e.id.clone())),
+                                Self::item("Delete…", Action::DeleteSnapshot(e.id.clone())),
+                            ],
+                            ..Default::default()
+                        }
+                        .into()
+                    })
                     .collect(),
                 ..Default::default()
             }
@@ -143,11 +168,11 @@ impl ksni::Tray for LinuxMenu {
                     s.settings.startup_snapshot.is_none(),
                     Action::StartupSnapshot(None),
                 ))
-                .chain(s.snapshots.iter().map(|id| {
+                .chain(s.snapshots.iter().map(|e| {
                     Self::check(
-                        &format!("Snapshot {id}"),
-                        s.settings.startup_snapshot.as_ref() == Some(id),
-                        Action::StartupSnapshot(Some(id.clone())),
+                        &snapshot_label(e),
+                        s.settings.startup_snapshot.as_ref() == Some(&e.id),
+                        Action::StartupSnapshot(Some(e.id.clone())),
                     )
                 }))
                 .collect(),
@@ -269,24 +294,32 @@ impl PlatformTray {
         let _ = menu.append(&save);
         self.actions.push((save.id().clone(), Action::SaveSnapshot));
         let load = Submenu::new("Load snapshot", !s.snapshots.is_empty());
+        let edit = Submenu::new("Edit snapshots", !s.snapshots.is_empty());
         let startup = Submenu::new("Snapshot at startup", true);
         let none = CheckMenuItem::new("None", true, s.settings.startup_snapshot.is_none(), None);
         let _ = startup.append(&none);
         self.actions.push((none.id().clone(), Action::StartupSnapshot(None)));
-        for id in &s.snapshots {
-            let item = MenuItem::new(format!("Snapshot {id}"), true, None);
+        for e in &s.snapshots {
+            let id = &e.id;
+            let item = MenuItem::new(snapshot_label(e), true, None);
             let _ = load.append(&item);
             self.actions.push((item.id().clone(), Action::LoadSnapshot(id.clone())));
-            let item = CheckMenuItem::new(
-                format!("Snapshot {id}"),
-                true,
-                s.settings.startup_snapshot.as_ref() == Some(id),
-                None,
-            );
+            let item =
+                CheckMenuItem::new(snapshot_label(e), true, s.settings.startup_snapshot.as_ref() == Some(id), None);
             let _ = startup.append(&item);
             self.actions.push((item.id().clone(), Action::StartupSnapshot(Some(id.clone()))));
+            let actions = Submenu::new(snapshot_label(e), true);
+            for (label, action) in
+                [("Rename…", Action::RenameSnapshot(id.clone())), ("Delete…", Action::DeleteSnapshot(id.clone()))]
+            {
+                let item = MenuItem::new(label, true, None);
+                let _ = actions.append(&item);
+                self.actions.push((item.id().clone(), action));
+            }
+            let _ = edit.append(&actions);
         }
         let _ = menu.append(&load);
+        let _ = menu.append(&edit);
         let _ = menu.append(&startup);
         let quit = MenuItem::new("Quit Tilekeep", true, None);
         let _ = menu.append(&quit);

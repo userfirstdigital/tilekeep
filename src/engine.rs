@@ -51,6 +51,7 @@ impl Desktop {
     pub fn snapshot(&self, windows: Vec<crate::snapshots::AppWindow>) -> crate::snapshots::Snapshot {
         crate::snapshots::Snapshot {
             schema: 1,
+            name: String::new(),
             gap: self.gap,
             windows,
             monitors: self
