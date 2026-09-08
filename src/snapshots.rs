@@ -29,6 +29,8 @@ pub enum Node {
     Split {
         axis: String,
         ratio: f64,
+        #[serde(default, rename = "preserveSpace")]
+        preserve_space: bool,
         first: Box<Node>,
         second: Box<Node>,
     },
@@ -81,7 +83,7 @@ pub fn validate(s: &Snapshot) -> Result<(), String> {
                     && (windows.is_empty() || *active < windows.len())
                     && windows.iter().all(|w| tokens.contains(w.as_str()) && used.insert(w.clone()))
             }
-            Node::Split { axis, ratio, first, second } => {
+            Node::Split { axis, ratio, first, second, .. } => {
                 matches!(axis.as_str(), "x" | "y")
                     && ratio.is_finite()
                     && (0.0..=1.0).contains(ratio)
@@ -333,6 +335,7 @@ mod tests {
         s.monitors[0].root = Node::Split {
             axis: "z".into(),
             ratio: 0.5,
+            preserve_space: false,
             first: Box::new(Node::Leaf { windows: vec![], active: 0 }),
             second: Box::new(Node::Leaf { windows: vec![], active: 0 }),
         };
@@ -343,6 +346,17 @@ mod tests {
         for id in ["../x", "/tmp/x", "", "x.json"] {
             assert!(path(id).is_err());
         }
+    }
+    #[test]
+    fn exact_vacancy_flag_round_trips_and_old_snapshots_default_false() {
+        let old = r#"{"kind":"split","axis":"x","ratio":0.98,"first":{"kind":"leaf","windows":[]},"second":{"kind":"leaf","windows":[]}}"#;
+        let mut node: Node = serde_json::from_str(old).unwrap();
+        let Node::Split { preserve_space, .. } = &mut node else { panic!("expected split") };
+        assert!(!*preserve_space);
+        *preserve_space = true;
+        let encoded = serde_json::to_string(&node).unwrap();
+        let restored: Node = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(restored, Node::Split { preserve_space: true, .. }));
     }
     #[test]
     fn matching_does_not_reuse_a_window() {

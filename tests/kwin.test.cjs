@@ -15,7 +15,7 @@ function backend() {
         monitors:[], focused:null, floating:new Set(), identities:new Map(), expectedGeometry:new Map(),
         deferredPlacements:new Map(), interactiveWindows:new Set(), placementQueue:[], currentPlacement:null,
         placementAttempt:0, windowConnections:new Map(), sequence:1,pendingSnapshot:null,
-        previewOwner:null,previewGeometry:null,dragPreview:{visible:false},
+        previewOwner:null,previewGeometry:null,dragPreview:{visible:false},resizeGuide:{visible:false},resizeGuides:[],
         placementDeadline:timer(), placementSpacing:timer(), recoveryTimer:timer(),workAreaTimer:timer(),
         KWin:{MaximizeArea:0},
         Workspace:{currentDesktop:1,currentActivity:'test',raiseWindow(){},hideOutline(){}},
@@ -53,6 +53,11 @@ test('sleeping clients are reconciled after wake without another retile command'
     c.retryDeferredPlacements();w.commit();
     assert.equal(c.currentPlacement,null);assert.equal(c.deferredPlacements.size,0);
     assert.equal(w.frameGeometry.width,980);
+});
+test('native KWin tile associations are released even when geometry already matches',()=>{
+    const c=backend(),w=window(c);c.apply();let released=0;
+    w.tile={unmanage(client){assert.equal(client,w);released++;w.tile=null;}};
+    c.apply();assert.equal(released,1);assert.equal(w.tile,null);
 });
 test('interactive moves cancel pending requests and never resize with undefined geometry',()=>{
     const c=backend();const w=window(c,{async:true});c.apply();
@@ -353,11 +358,138 @@ test('vacant-edge resize can reach the boundary and later reopen the space',()=>
         c.splitSlot(m,m.root,axis,first,hidden);
         const before=c.rects(m).get(c.slotOf(w)[1]),full=c.inset(m.area);
         c.adjustRatio(w,before,full);
-        assert.equal(m.root.ratio,first?0:1);
         assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...full});
+        assert.ok(c.slotOf(hidden),'hidden window remains tracked');
         c.adjustRatio(w,full,before);
         assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...before});
     }
+});
+test('resizing into empty space does not move unrelated windows across an ancestor divider',()=>{
+    for(const axis of ['x','y'])for(const first of [true,false]) {
+        const c=backend(),w=window(c),m=c.monitors[0],unrelated={},empty={};
+        c.gap=1;
+        c.splitSlot(m,m.root,axis,first,empty);
+        c.splitSlot(m,c.slotOf(w)[1],axis==='x'?'y':'x',false,unrelated);
+        c.detach(empty);
+        const original=c.rects(m),before=original.get(c.slotOf(w)[1]),fixed=original.get(c.slotOf(unrelated)[1]),after={...before};
+        const edge=axis==='x'?(first?'left':'right'):(first?'top':'bottom');
+        c.setEdge(after,edge,c.edgePosition(before,edge)+(first?-150:150));
+        assert.equal(c.adjustRatio(w,before,after),true);
+        assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},after);
+        assert.deepEqual({...c.rects(m).get(c.slotOf(unrelated)[1])},{...fixed});
+        const newcomer={};c.Workspace.activeWindow=w;
+        c.appeared(newcomer);
+        assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},after,'new window cannot reclaim occupied resize area');
+    }
+});
+test('a shared resize affects only directly touching neighbors, not their unrelated siblings',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],neighbor={},unrelated={};c.gap=1;
+    c.splitSlot(m,m.root,'x',false,neighbor);c.splitSlot(m,c.slotOf(w)[1],'y',false,unrelated);
+    const old=c.rects(m),before=old.get(c.slotOf(w)[1]),fixed=old.get(c.slotOf(unrelated)[1]);
+    const after={...before,width:before.width+100};
+    assert.equal(c.adjustRatio(w,before,after),true);
+    const next=c.rects(m);
+    assert.deepEqual({...next.get(c.slotOf(unrelated)[1])},{...fixed});
+    assert.deepEqual({...next.get(c.slotOf(w)[1])},after);
+    assert.equal(next.get(c.slotOf(neighbor)[1]).x,c.rectRight(after)+1);
+});
+test('shrinking a monitor-filling window creates reusable space without a parent split',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],before=c.rects(m).get(m.root);
+    const after={...before,width:before.width-210};
+    assert.equal(c.adjustRatio(w,before,after),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},after);
+    assert.ok(c.leaves(m.root).some(s=>!s.windows.length));
+});
+test('intentional small vacancies are not swallowed by the legacy five-percent collapse rule',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;
+    const before=c.rects(m).get(m.root),after={...before,width:before.width-20};
+    assert.equal(c.adjustRatio(w,before,after),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},after);
+    assert.equal(c.snapshotTree(m.root).preserveSpace,true);
+});
+test('quarter half and three-quarter snaps capture within six pixels and release beyond it',()=>{
+    for(const axis of ['x','y'])for(const f of [.25,.5,.75])for(const leading of [true,false]) {
+        const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;
+        const before=c.rects(m).get(m.root),e=axis==='x'?(leading?'left':'right'):(leading?'top':'bottom');
+        const p=Math.round(before[axis]+(axis==='x'?before.width:before.height)*f),after={...before};
+        c.setEdge(after,e,p+5);
+        const hit=c.resizeSnap(w,before,after,[e]);
+        assert.equal(c.edgePosition(hit.rect,e),p);assert.equal(hit.guides.length,1);
+        c.setEdge(after,e,p+7);
+        const free=c.resizeSnap(w,before,after,[e]);
+        assert.equal(free.guides.length,0);assert.equal(c.edgePosition(free.rect,e),p+7);
+    }
+});
+test('equal-size and aligned-edge snaps use other visible windows without resizing them',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],other={};c.gap=1;
+    c.splitSlot(m,m.root,'y',false,other);
+    const otherBefore=c.rects(m).get(c.slotOf(other)[1]);
+    c.adjustRatio(other,otherBefore,{...otherBefore,width:333});
+    const before=c.rects(m).get(c.slotOf(w)[1]),after={...before,width:337};
+    const hit=c.resizeSnap(w,before,after,['right']);
+    assert.equal(hit.rect.width,333);assert.equal(hit.guides.length,1);
+    assert.equal(c.rects(m).get(c.slotOf(other)[1]).width,333);
+});
+test('unachievable snaps do not show misleading guides or violate minimum sizes',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];w.minSize={width:650,height:100};
+    const before=c.rects(m).get(m.root),after={...before,width:494};
+    assert.equal(c.resizeSnap(w,before,after,['right']).guides.length,0);
+    assert.equal(c.adjustRatio(w,before,after),false);
+    assert.deepEqual({...c.rects(m).get(m.root)},{...before});
+});
+test('interactive resize snaps gently, releases with pointer movement, and Escape preserves the layout',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;c.apply();w.move=false;
+    const before={...w.frameGeometry};c.Workspace.cursorPos={x:c.rectRight(before),y:100};
+    w.interactiveMoveResizeStarted.emit();
+    c.Workspace.cursorPos={x:505,y:100};
+    w.frameGeometry={...before,width:504};w.interactiveMoveResizeStepped.emit(w.frameGeometry);
+    assert.equal(c.rectRight(w.frameGeometry),500);assert.equal(c.resizeGuide.visible,true);
+    c.Workspace.cursorPos={x:510,y:100};w.frameGeometry={...before,width:509};w.interactiveMoveResizeStepped.emit(w.frameGeometry);
+    assert.equal(c.resizeGuide.visible,false);assert.equal(c.rectRight(w.frameGeometry),510);
+    w.frameGeometry=before;w.interactiveMoveResizeFinished.emit();
+    assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},before);assert.equal(c.resizeGuide.visible,false);
+});
+test('a delayed first Wayland frame does not cancel the resize and corners can acquire a second edge',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;c.apply();w.move=false;
+    const initial={...w.frameGeometry};c.adjustRatio(w,initial,{...initial,width:600,height:600});c.apply();
+    const before={...w.frameGeometry};c.Workspace.cursorPos={x:c.rectRight(before),y:c.rectBottom(before)};
+    w.interactiveMoveResizeStarted.emit();
+    c.Workspace.cursorPos={x:c.rectRight(before)+30,y:c.rectBottom(before)};
+    w.interactiveMoveResizeStepped.emit(before);
+    assert.equal(w.frameGeometry.width,before.width+30);
+    c.Workspace.cursorPos={x:c.rectRight(before)+30,y:c.rectBottom(before)+30};
+    w.interactiveMoveResizeStepped.emit(w.frameGeometry);
+    assert.equal(w.frameGeometry.height,before.height+30);
+    w.interactiveMoveResizeFinished.emit();
+    assert.equal(c.rects(m).get(c.slotOf(w)[1]).height,before.height+30);
+});
+test('restarting adopts valid actual frames instead of replaying a stale default tree',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],other={frameGeometry:{x:600,y:10,width:390,height:780}};
+    w.frameGeometry={x:10,y:10,width:350,height:500};
+    c.splitSlot(m,m.root,'x',false,other);
+    c.adoptExistingGeometry();
+    assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...w.frameGeometry});
+    assert.deepEqual({...c.rects(m).get(c.slotOf(other)[1])},{...other.frameGeometry});
+});
+test('snapshot round trip keeps deliberately small resized vacancies exact',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;
+    w.internalId='a';const before=c.rects(m).get(m.root),after={...before,width:before.width-20};
+    c.adjustRatio(w,before,after);
+    const saved={gap:1,windows:[{token:'a',app:'test',title:'test',rect:after}],monitors:[{root:c.snapshotTree(m.root)}]};
+    c.Workspace.stackingOrder=[w];c.syncMonitors=()=>{};c.snapshotRestored={call(){}};
+    c.restoreSnapshot(JSON.stringify(saved));
+    assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},after);
+});
+test('collision-limited resizing advances to a valid local edge instead of undoing the gesture',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],other={};c.gap=1;
+    c.splitSlot(m,m.root,'x',false,other);
+    const before=c.rects(m).get(c.slotOf(w)[1]),neighbor=c.rects(m).get(c.slotOf(other)[1]);
+    c.adjustRatio(w,before,{...before,width:before.width-100});
+    const start=c.rects(m).get(c.slotOf(w)[1]),raw={...start,width:start.width+250};
+    const bounded=c.constrainedResize(w,start,raw);
+    assert.ok(bounded.width>start.width+90);assert.ok(c.rectRight(bounded)+1<=neighbor.x);
+    assert.equal(c.adjustRatio(w,start,bounded),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(other)[1])},{...neighbor});
 });
 test('occupied minimum sizes and ordinary large empty slots remain intact',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],other={minSize:{width:200,height:200}};

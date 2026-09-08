@@ -58,9 +58,20 @@ LEFT│ ←    CENTER   → │RIGHT      Center → swap (Ctrl+Center → stack
 ```
 
 Closing a window leaves its slot **empty**; the next window you open takes the most recently
-emptied slot, so nothing else moves. `Super+Shift+K` compacts when *you* decide. Resizing any
-window with the mouse moves the boundary it shares with its neighbours; everything nested on
-either side follows.
+emptied slot, so nothing else moves. `Super+Shift+K` compacts when *you* decide.
+
+On **Plasma Wayland**, edge resizing recuts the local space: unrelated windows retain their
+rectangles, while a directly touching neighbor can shrink to accommodate the shared edge.
+Shrinking a window creates reusable empty space, including when it fills the monitor.
+Faint alignment guides and a **6-logical-pixel** snap range help match quarter/half/three-quarter
+positions in the work area or available space, other window edges, and equal widths/heights.
+Drag more than 6 pixels past a target to override it; Escape cancels the gesture. Snaps respect
+application minimum sizes and panel work areas. When a collision or layout constraint prevents
+further growth, the edge stops at the last valid local position rather than moving distant windows.
+An already valid non-overlapping desktop layout is retained when the Plasma runtime restarts.
+
+Windows and X11 currently retain the original shared-divider resize behavior; these new local
+resize and alignment-guide features are Plasma-specific.
 
 ## Run
 

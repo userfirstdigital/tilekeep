@@ -29,6 +29,7 @@ Item {
     property string previewZone: "center"
     property int sequence: 1
     property var pendingSnapshot: null
+    property var resizeGuides: []
 
     function rect(r) { return {x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height)}; }
     function rectRight(r) { return r.x + r.width; }
@@ -103,6 +104,7 @@ Item {
     }
     function vacantSubtree(node) { return leaves(node).every(s=>vacantHere(s)); }
     function collapsedSide(node) {
+        if(node.preserveSpace)return 0;
         const first=vacantSubtree(node.first),second=vacantSubtree(node.second);
         if(first&&!second&&node.ratio<=minRatio)return -1;
         if(second&&!first&&node.ratio>=maxRatio)return 1;
@@ -280,6 +282,9 @@ Item {
         currentPlacement=placementQueue.shift();placementAttempt=0;
         const p=currentPlacement;
         if(!tileable(p.window)||!visibleHere(p.window)||floating.has(p.window)) { finishCurrentPlacement();return; }
+        // Matching geometry does not mean exclusive ownership: a native KWin
+        // tile can still couple this window to other windows during edge drags.
+        if(p.window.tile)p.window.tile.unmanage(p.window);
         if(p.window.output===p.output&&geometryMatches(windowRect(p.window),p.rect)) { finishCurrentPlacement();return; }
         if(p.window.output!==p.output)Workspace.sendClientToScreen(p.window,p.output);
         expectedGeometry.set(p.window,p.rect);
@@ -297,8 +302,9 @@ Item {
         currentPlacement=null;
         placementSpacing.restart();
     }
-    function geometryMatches(got,wanted) {
-        return wanted&&Math.abs(got.x-wanted.x)<=2&&Math.abs(got.y-wanted.y)<=2&&Math.abs(got.width-wanted.width)<=2&&Math.abs(got.height-wanted.height)<=2;
+    function geometryMatches(got,wanted,tolerance) {
+        const t=tolerance===undefined?2:tolerance;
+        return got&&wanted&&Math.abs(got.x-wanted.x)<=t&&Math.abs(got.y-wanted.y)<=t&&Math.abs(got.width-wanted.width)<=t&&Math.abs(got.height-wanted.height)<=t;
     }
     function retryDeferredPlacements() {
         if(!enabled||dryRun||interactiveWindows.size||currentPlacement||placementQueue.length)return;
@@ -444,26 +450,157 @@ Item {
         }
         detach(w); splitSlot(m,target,z==="left"||z==="right"?"x":"y",z==="left"||z==="top",w); return true;
     }
-    function adjustRatio(w,before,after) {
-        const found=slotOf(w); if(!found)return;
-        const m=found[0],s=found[1];
-        const changes=[
-            ["x",before.x,after.x,true],["x",rectRight(before),rectRight(after),false],
-            ["y",before.y,after.y,true],["y",rectBottom(before),rectBottom(after),false]
-        ].filter(v=>Math.abs(v[1]-v[2])>2);
-        for(const [axis,oldPos,newPos,isStart] of changes) {
-            let child=s,parent=s.parent;
-            while(parent) {
-                if(parent.axis===axis&&((isStart&&parent.second===child)||(!isStart&&parent.first===child))) {
-                    const bounds=rects(m).get(parent);
-                    const start=axis==="x"?bounds.x:bounds.y,total=axis==="x"?bounds.width:bounds.height;
-                    const lower=vacantSubtree(parent.first)?0:minRatio;
-                    const upper=vacantSubtree(parent.second)?1:maxRatio;
-                    parent.ratio=Math.max(lower,Math.min(upper,(newPos-start-gap*(isStart?1:0))/Math.max(1,total-gap))); break;
+    function resizeEdges(before,after) {
+        return ["left","right","top","bottom"].filter(e=>Math.abs(edgePosition(before,e)-edgePosition(after,e))>2);
+    }
+    function edgePosition(r,e) { return e==="left"?r.x:e==="right"?rectRight(r):e==="top"?r.y:rectBottom(r); }
+    function setEdge(r,e,p) {
+        if(e==="left"){r.width=rectRight(r)-p;r.x=p;}
+        else if(e==="right")r.width=p-r.x;
+        else if(e==="top"){r.height=rectBottom(r)-p;r.y=p;}
+        else r.height=p-r.y;
+    }
+    function intersects(a,b,padding) {
+        return a.x<rectRight(b)+padding&&rectRight(a)+padding>b.x&&a.y<rectBottom(b)+padding&&rectBottom(a)+padding>b.y;
+    }
+    // Recut only empty space. Occupied rectangles are constraints, not ratios
+    // to be scaled when an unrelated ancestor divider moves.
+    function layoutAround(items,bounds,depth) {
+        if(!items.length)return leaf();
+        if(depth>60)return null;
+        if(items.length===1&&geometryMatches(items[0].rect,bounds,0))return Object.assign({},items[0].slot,{windows:items[0].slot.windows.slice(),parent:null});
+        const cuts=[];
+        for(const axis of ["x","y"]) {
+            const start=bounds[axis],size=axis==="x"?bounds.width:bounds.height,end=start+size;
+            const positions=new Set();
+            for(const item of items){positions.add(item.rect[axis]-gap);positions.add(item.rect[axis]+(axis==="x"?item.rect.width:item.rect.height));}
+            for(const p of positions) {
+                if(p<start||p+gap>end||p===end||p+gap===start)continue;
+                const first=[],second=[];
+                for(const item of items) {
+                    const lo=item.rect[axis],hi=lo+(axis==="x"?item.rect.width:item.rect.height);
+                    if(hi<=p)first.push(item);else if(lo>=p+gap)second.push(item);else break;
                 }
-                child=parent;parent=parent.parent;
+                if(first.length+second.length!==items.length)continue;
+                cuts.push({axis,p,first,second,score:Math.abs(first.length-second.length)});
             }
         }
+        cuts.sort((a,b)=>a.score-b.score);
+        if(!cuts.length)return null;
+        // Any unobstructed full cut is safe; no occupied rectangle is divided.
+        const c=cuts[0],a=Object.assign({},bounds),b=Object.assign({},bounds);
+        if(c.axis==="x"){a.width=c.p-bounds.x;b.x=c.p+gap;b.width=rectRight(bounds)-b.x;}
+        else {a.height=c.p-bounds.y;b.y=c.p+gap;b.height=rectBottom(bounds)-b.y;}
+        const first=layoutAround(c.first,a,depth+1),second=layoutAround(c.second,b,depth+1);
+        if(!first||!second)return null;
+        const s={kind:"split",axis:c.axis,ratio:(c.p-bounds[c.axis])/Math.max(1,(c.axis==="x"?bounds.width:bounds.height)-gap),preserveSpace:true,first,second,parent:null};
+        first.parent=s;second.parent=s;return s;
+    }
+    function resizeLayout(w,before,after) {
+        const found=slotOf(w);if(!found)return null;
+        const [m,slot]=found,map=rects(m),bounds=inset(m.area),target=rect(after),edges=resizeEdges(before,after);
+        const items=leaves(m.root).filter(s=>s===slot||!vacantHere(s)).map(s=>({slot:s,rect:Object.assign({},s===slot?target:map.get(s))}));
+        if(!edges.length)return null;
+        // The work area, not the screen edge, is the outer limit (panels included).
+        for(const e of edges) {
+            const p=edgePosition(target,e),limit=edgePosition(bounds,e);
+            setEdge(target,e,e==="left"||e==="top"?Math.max(limit,p):Math.min(limit,p));
+        }
+        // Only a directly adjacent window may share a resize. All other windows
+        // remain fixed, even when they used to share an ancestor split.
+        for(const e of edges) {
+            const horizontal=e==="left"||e==="right",leading=e==="left"||e==="top";
+            const opposite=e==="left"?"right":e==="right"?"left":e==="top"?"bottom":"top";
+            for(const item of items) {
+                if(item.slot===slot)continue;
+                const r=item.rect,old=map.get(item.slot);
+                const overlap=horizontal?Math.min(rectBottom(before),rectBottom(old))-Math.max(before.y,old.y):Math.min(rectRight(before),rectRight(old))-Math.max(before.x,old.x);
+                const adjacent=overlap>0&&Math.abs(edgePosition(old,opposite)-edgePosition(before,e)-(leading?-gap:gap))<=2;
+                if(!adjacent||!intersects(target,r,gap))continue;
+                const min=minimumSize(item.slot),size=Math.max(1,horizontal?min.width:min.height);
+                const limit=leading?edgePosition(old,e)+size+gap:edgePosition(old,e)-size-gap;
+                setEdge(target,e,leading?Math.max(edgePosition(target,e),limit):Math.min(edgePosition(target,e),limit));
+            }
+            for(const item of items) {
+                if(item.slot===slot)continue;
+                const r=item.rect,old=map.get(item.slot);
+                const overlap=horizontal?Math.min(rectBottom(before),rectBottom(old))-Math.max(before.y,old.y):Math.min(rectRight(before),rectRight(old))-Math.max(before.x,old.x);
+                if(overlap>0&&Math.abs(edgePosition(old,opposite)-edgePosition(before,e)-(leading?-gap:gap))<=2&&intersects(target,r,gap))setEdge(r,opposite,edgePosition(target,e)+(leading?-gap:gap));
+            }
+        }
+        items.find(i=>i.slot===slot).rect=target;
+        for(let i=0;i<items.length;i++) {
+            const item=items[i],min=minimumSize(item.slot),r=item.rect;
+            if(r.width<Math.max(1,min.width)||r.height<Math.max(1,min.height))return null;
+            for(let j=0;j<i;j++)if(intersects(r,items[j].rect,gap))return null;
+        }
+        const tree=layoutAround(items,bounds,0);if(!tree)return null;
+        // Hidden windows keep a remembered home without constraining free space.
+        const vacant=leaves(tree).filter(s=>!s.windows.length);
+        for(const old of leaves(m.root).filter(s=>s!==slot&&vacantHere(s))) {
+            if(!old.windows.length&&!old.remembered)continue;
+            const home=vacant.shift()||leaves(tree).find(s=>s.windows.includes(w));
+            for(const hidden of old.windows)home.windows.push(hidden);
+            if(!home.remembered)home.remembered=old.remembered;
+        }
+        const check=new Map();compute(tree,bounds,check);
+        for(const item of items) {
+            const placed=leaves(tree).find(s=>s.windows.includes(item.slot.windows[0]));
+            if(!placed||!geometryMatches(check.get(placed),item.rect,0))return null;
+        }
+        return {monitor:m,tree,rect:target};
+    }
+    function adjustRatio(w,before,after) {
+        const plan=resizeLayout(w,before,after);if(!plan)return false;
+        plan.monitor.root=plan.tree;return true;
+    }
+    function constrainedResize(w,before,after) {
+        const plan=resizeLayout(w,before,after);if(plan)return plan.rect;
+        // Stop at the last valid local layout instead of reverting the whole
+        // gesture on release. Never move distant windows to force a fit.
+        let low=0,high=1,result=Object.assign({},before);
+        for(let i=0;i<12;i++) {
+            const t=(low+high)/2,candidate={};
+            for(const key of ["x","y","width","height"])candidate[key]=Math.round(before[key]+(after[key]-before[key])*t);
+            const next=resizeLayout(w,before,candidate);
+            if(next){low=t;result=next.rect;}else high=t;
+        }
+        return result;
+    }
+    function resizeSnap(w,before,after,edges) {
+        const found=slotOf(w);if(!found)return {rect:after,guides:[]};
+        const [m,slot]=found,bounds=inset(m.area),map=rects(m),result=rect(after),guides=[];
+        const space=Object.assign({},bounds);
+        for(const s of leaves(m.root))if(s!==slot&&!vacantHere(s)) {
+            const r=map.get(s);
+            if(Math.min(rectBottom(before),rectBottom(r))>Math.max(before.y,r.y)) {
+                if(rectRight(r)<=before.x)setEdge(space,"left",Math.max(space.x,rectRight(r)+gap));
+                if(r.x>=rectRight(before))setEdge(space,"right",Math.min(rectRight(space),r.x-gap));
+            }
+            if(Math.min(rectRight(before),rectRight(r))>Math.max(before.x,r.x)) {
+                if(rectBottom(r)<=before.y)setEdge(space,"top",Math.max(space.y,rectBottom(r)+gap));
+                if(r.y>=rectBottom(before))setEdge(space,"bottom",Math.min(rectBottom(space),r.y-gap));
+            }
+        }
+        // No sticky state: six logical pixels to capture, seven to escape.
+        for(const e of edges) {
+            const horizontal=e==="left"||e==="right",start=horizontal?bounds.x:bounds.y,size=horizontal?bounds.width:bounds.height;
+            const leading=e==="left"||e==="top",candidates=[{p:start,label:"Work area"},{p:start+size,label:"Work area"}];
+            for(const f of [.25,.5,.75])candidates.push({p:Math.round(start+size*f),label:f===.5?"½":""+(f===.25?"¼":"¾")});
+            for(const f of [.25,.5,.75])candidates.push({p:Math.round((horizontal?space.x:space.y)+(horizontal?space.width:space.height)*f),label:"Space fraction"});
+            for(const s of leaves(m.root))if(s!==slot&&!vacantHere(s)) {
+                const r=map.get(s),lo=horizontal?r.x:r.y,extent=horizontal?r.width:r.height;
+                candidates.push({p:lo,label:"Aligned"},{p:lo+extent,label:"Aligned"},
+                    {p:leading?lo+extent+gap:lo-gap,label:"Aligned"},
+                    {p:leading?(horizontal?rectRight(result):rectBottom(result))-extent:(horizontal?result.x:result.y)+extent,label:"Equal size"});
+            }
+            const p=edgePosition(result,e),nearest=candidates.filter(c=>Math.abs(c.p-p)<=6).sort((a,b)=>Math.abs(a.p-p)-Math.abs(b.p-p))[0];
+            if(nearest){setEdge(result,e,nearest.p);guides.push({edge:e,pos:nearest.p,label:nearest.label});}
+        }
+        // Never advertise a snap which the final constrained layout can't honor.
+        const plan=guides.length?resizeLayout(w,before,result):null;
+        if(!plan||!geometryMatches(plan.rect,result,0))return {rect:after,guides:[]};
+        return {rect:result,guides};
     }
     function subtreeEmpty(node) { return leaves(node).every(s=>!s.windows.length); }
     function compactNode(node) {
@@ -498,6 +635,13 @@ Item {
     function hidePreview(w) {
         if(w&&previewOwner!==w)return;
         dragPreview.visible=false;previewOwner=null;previewGeometry=null;previewArea=null;
+        resizeGuides=[];resizeGuide.visible=false;
+    }
+    function showResizeGuide(w,snap) {
+        const found=slotOf(w);if(!found)return;
+        const r=inset(found[0].area);
+        resizeGuide.x=r.x;resizeGuide.y=r.y;resizeGuide.width=r.width;resizeGuide.height=r.height;
+        resizeGuides=snap.guides;resizeGuide.visible=resizeGuides.length>0;previewOwner=w;
     }
     function connectWindow(w) {
         if(windowConnections.has(w))return;
@@ -515,10 +659,35 @@ Item {
             interactiveWindows.add(w);
             placementDeadline.stop();placementSpacing.stop();
             placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
-            if(!paused&&tileable(w)&&!floating.has(w))drag={rect:windowRect(w),moving:w.move};
+            if(!paused&&tileable(w)&&!floating.has(w))drag={rect:windowRect(w),moving:w.move,cursor:Workspace.cursorPos?{x:Workspace.cursorPos.x,y:Workspace.cursorPos.y}:null,edges:[],raw:null};
         };
         handlers.stepped=g=>{
-            if(!drag||!drag.moving)return;
+            if(!drag||paused)return;
+            if(!drag.moving) {
+                const changed=resizeEdges(drag.rect,g);
+                // Wayland's first step can still report the old committed frame.
+                // Infer edge movement from the pointer too, so we don't send that
+                // old size back and cancel the client's pending resize.
+                if(drag.cursor&&Workspace.cursorPos)for(const e of ["left","right","top","bottom"]) {
+                    const horizontal=e==="left"||e==="right",p=horizontal?drag.cursor.x:drag.cursor.y;
+                    const delta=horizontal?Workspace.cursorPos.x-drag.cursor.x:Workspace.cursorPos.y-drag.cursor.y;
+                    if(Math.abs(p-edgePosition(drag.rect,e))<=24&&Math.abs(delta)>2)changed.push(e);
+                }
+                drag.edges=Array.from(new Set(drag.edges.concat(changed)));
+                if(!drag.edges.length)return;
+                let raw=rect(g);
+                if(drag.cursor&&Workspace.cursorPos) {
+                    raw=Object.assign({},drag.rect);
+                    for(const e of drag.edges)setEdge(raw,e,edgePosition(drag.rect,e)+(e==="left"||e==="right"?Workspace.cursorPos.x-drag.cursor.x:Workspace.cursorPos.y-drag.cursor.y));
+                }
+                drag.raw=raw;
+                const bounded=constrainedResize(w,drag.rect,raw),snap=resizeSnap(w,drag.rect,bounded,drag.edges);
+                showResizeGuide(w,snap);
+                // The cursor remains free; each step is measured from its original
+                // position, never from the last snapped client geometry.
+                if(!geometryMatches(windowRect(w),snap.rect,0)&&!dryRun)w.frameGeometry=snap.rect;
+                return;
+            }
             const hit=slotAt(Workspace.cursorPos);if(!hit){hidePreview(w);return;}
             const empty=vacantHere(hit[1]);
             const z=empty?fittingEmptyZone(w,hit[2],emptyZone(hit[2],Workspace.cursorPos)):zone(hit[2],Workspace.cursorPos);
@@ -533,7 +702,15 @@ Item {
             // Escape cancels a drag. The cursor can still be over another slot.
             if(d.moving) {
                 if(!geometryMatches(windowRect(w),d.rect))drop(w,Workspace.cursorPos,false);
-            } else adjustRatio(w,d.rect,windowRect(w));
+            } else {
+                const final=windowRect(w);
+                // Escape restores the initial geometry: do not commit the last guide.
+                if(!geometryMatches(final,d.rect)) {
+                    const bounded=constrainedResize(w,d.rect,d.raw||final);
+                    const snap=resizeSnap(w,d.rect,bounded,d.edges.length?d.edges:resizeEdges(d.rect,final));
+                    adjustRatio(w,d.rect,snap.rect);
+                }
+            }
             apply();
         };
         handlers.minimized=()=>{apply();};
@@ -589,7 +766,7 @@ Item {
     }
     function snapshotTree(node) {
         if(node.kind==="leaf")return {kind:"leaf",windows:node.windows.map(w=>String(w.internalId)),active:node.active};
-        return {kind:"split",axis:node.axis,ratio:node.ratio,first:snapshotTree(node.first),second:snapshotTree(node.second)};
+        return {kind:"split",axis:node.axis,ratio:node.ratio,preserveSpace:!!node.preserveSpace,first:snapshotTree(node.first),second:snapshotTree(node.second)};
     }
     function saveSnapshot() {
         const snapshot={schema:1,gap,windows:snapshotWindows(),monitors:monitors.map(m=>({name:m.name,area:m.area,root:snapshotTree(m.root)}))};
@@ -620,7 +797,7 @@ Item {
                 for(const token of n.windows){const e=byToken.get(token);if(!e)continue;e.slot=s;if(e.window)assign(s,e.window);}
                 s.active=Math.min(n.active,Math.max(0,s.windows.length-1));return s;
             }
-            const s={kind:"split",axis:n.axis,ratio:n.ratio,parent};s.first=tree(n.first,s);s.second=tree(n.second,s);return s;
+            const s={kind:"split",axis:n.axis,ratio:n.ratio,preserveSpace:!!n.preserveSpace,parent};s.first=tree(n.first,s);s.second=tree(n.second,s);return s;
         }
         syncMonitors();floating.clear();gap=saved.gap;
         for(let i=0;i<monitors.length;i++) {
@@ -635,9 +812,28 @@ Item {
         snapshotRestored.arguments=[JSON.stringify({gap,missing:entries.filter(e=>!e.window).length})];snapshotRestored.call();
     }
 
+    function adoptExistingGeometry() {
+        // A runtime upgrade must not retile an already valid desktop. Rebuild
+        // from actual frames, including user adjustments made while stopped.
+        for(const m of monitors) {
+            const bounds=inset(m.area),windows=allWindows(m.root),items=[];
+            for(const w of windows.filter(w=>visibleHere(w))) {
+                const s=leaf();s.windows=[w];items.push({slot:s,rect:windowRect(w)});
+            }
+            if(!items.length)continue;
+            if(items.some((item,i)=>item.rect.x<bounds.x||item.rect.y<bounds.y||rectRight(item.rect)>rectRight(bounds)||rectBottom(item.rect)>rectBottom(bounds)||items.slice(0,i).some(other=>intersects(item.rect,other.rect,gap))))continue;
+            const tree=layoutAround(items,bounds,0);if(!tree)continue;
+            const map=new Map();compute(tree,bounds,map);
+            if(items.some(item=>{const s=leaves(tree).find(s=>s.windows.includes(item.slot.windows[0]));return !geometryMatches(map.get(s),item.rect,0);}))continue;
+            const vacant=leaves(tree).filter(s=>!s.windows.length);
+            for(const w of windows.filter(w=>!visibleHere(w)))assign(vacant.shift()||leaves(tree)[0],w);
+            m.root=tree;
+        }
+    }
     function start() {
         syncMonitors();
         for(const w of Workspace.stackingOrder) { connectWindow(w); appeared(w); }
+        adoptExistingGeometry();
         focused=Workspace.activeWindow; apply();
         console.log("Tilekeep: Plasma Wayland backend started; gap",gap,"dry-run",dryRun);
     }
@@ -673,6 +869,27 @@ Item {
     // KWin hides its shared Workspace outline after emitting each drag step.
     // Keep our own surface alive, changing geometry only when the target changes.
     // The outline hint keeps it in KWin's overlay layer, out of application lists.
+    Window {
+        id: resizeGuide
+        readonly property bool __kwin_outline: true
+        transientParent: null
+        flags: Qt.BypassWindowManagerHint | Qt.FramelessWindowHint |
+            Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
+        color: "transparent"
+        visible: false
+        Repeater {
+            model: root.resizeGuides
+            Rectangle {
+                required property var modelData
+                readonly property bool vertical: modelData.edge==="left"||modelData.edge==="right"
+                x: vertical?modelData.pos-resizeGuide.x:0
+                y: vertical?0:modelData.pos-resizeGuide.y
+                width: vertical?1:resizeGuide.width
+                height: vertical?resizeGuide.height:1
+                color: "#998ac7ff"
+            }
+        }
+    }
     Window {
         id: dragPreview
         readonly property bool __kwin_outline: true

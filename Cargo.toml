@@ -1,6 +1,6 @@
 [package]
 name = "windowmanager"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "Slot-based tiling window manager for Windows, Plasma Wayland, and Linux/X11"
 license = "Apache-2.0"

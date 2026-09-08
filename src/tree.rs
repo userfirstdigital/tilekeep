@@ -85,6 +85,7 @@ impl Tree {
                 NodeKind::Split { axis, ratio, first, second } => Node::Split {
                     axis: if *axis == SplitAxis::X { "x" } else { "y" }.into(),
                     ratio: *ratio as f64,
+                    preserve_space: false,
                     first: Box::new(visit(t, *first)),
                     second: Box::new(visit(t, *second)),
                 },
@@ -106,7 +107,7 @@ impl Tree {
                     let active = (*active).min(windows.len().saturating_sub(1));
                     NodeKind::Slot { windows, active, vacated_seq: None, remembered: None }
                 }
-                crate::snapshots::Node::Split { axis, ratio, first, second } => NodeKind::Split {
+                crate::snapshots::Node::Split { axis, ratio, first, second, .. } => NodeKind::Split {
                     axis: if axis == "x" { SplitAxis::X } else { SplitAxis::Y },
                     ratio: *ratio as f32,
                     first: visit(t, first, Some(id), mapping),
