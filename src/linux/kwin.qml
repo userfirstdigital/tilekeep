@@ -440,6 +440,9 @@ Item {
         return Math.abs(x-.5)>=Math.abs(y-.5)?(x<.5?"left":"right"):(y<.5?"top":"bottom");
     }
     function vacantHere(slot) { return !slot.windows.some(w=>visibleHere(w)); }
+    // While dragging, the source window does not occupy its original slot.
+    // Other visible members of a stack still do, and retain occupied-slot drops.
+    function vacantForDrop(slot,w) { return !slot.windows.some(other=>other!==w&&visibleHere(other)); }
     function emptyZone(r,p) {
         const x=(p.x-r.x)/r.width,y=(p.y-r.y)/r.height;
         const horizontal=x<.25?"left":x>.75?"right":"";
@@ -484,7 +487,7 @@ Item {
     }
     function dropPreview(w,hit,z) {
         const target=hit[1],r=hit[2],source=slotOf(w);
-        if(vacantHere(target)) {
+        if(vacantForDrop(target,w)) {
             // Simulate the tree edit as well as the fraction: vacating a tiny
             // source may collapse its old placeholder and change final bounds.
             function copy(n,parent) {
@@ -517,12 +520,13 @@ Item {
         if(floating.has(w))return false;
         const hit=slotAt(p); if(!hit)return false;
         const [m,target,r]=hit,source=slotOf(w);
-        if(vacantHere(target)) {
+        if(vacantForDrop(target,w)) {
             const z=fittingEmptyZone(w,r,emptyZone(r,p));
             if(z==="unavailable")return false;
+            if(source&&source[1]===target&&z==="center")return false;
             // Retain hidden occupants in the source when possible. Never close
             // them or make them visible while allocating the empty target.
-            const hidden=target.windows.slice(),active=target.active;
+            const hidden=target.windows.filter(other=>other!==w),active=target.active;
             detach(w);target.windows=[];target.active=0;
             if(source&&source[1]!==target)for(const hiddenWindow of hidden)assign(source[1],hiddenWindow);
             else {target.windows=hidden;target.active=active;}
@@ -838,7 +842,7 @@ Item {
                 return;
             }
             const hit=slotAt(Workspace.cursorPos);if(!hit){hidePreview(w);return;}
-            const empty=vacantHere(hit[1]);
+            const empty=vacantForDrop(hit[1],w);
             const z=empty?fittingEmptyZone(w,hit[2],emptyZone(hit[2],Workspace.cursorPos)):zone(hit[2],Workspace.cursorPos);
             const r=dropPreview(w,hit,z);
             showPreview(w,r,empty?hit[2]:null,z);

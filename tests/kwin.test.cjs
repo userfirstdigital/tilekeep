@@ -393,6 +393,46 @@ test('all nine empty-space drop zones match their final placement',()=>{
         assert.equal(c.leaves(m.root).length,2+Number(x!==.5)+Number(y!==.5));
     }
 });
+test('a dragged window can take a quarter or half of its own vacated slot',()=>{
+    for(const x of [.1,.5,.9])for(const y of [.1,.5,.9]) {
+        const c=backend(),w=window(c),m=c.monitors[0],target=c.slotOf(w)[1];
+        const r=c.rects(m).get(target),p={x:r.x+r.width*x,y:r.y+r.height*y};
+        const z=c.emptyZone(r,p),wanted=c.emptyPart(r,z),tree=m.root;
+        const preview=c.dropPreview(w,[m,target,r],z);
+        assert.equal(m.root,tree,'hover must not edit the saved layout');
+        assert.deepEqual({...preview},{...wanted},z);
+        assert.equal(c.drop(w,p,false),z!=='center');
+        assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...wanted},z);
+    }
+});
+test('native move callbacks keep full guides and change fractions inside the source slot without flicker',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0];c.apply();w.move=true;
+    const before={...w.frameGeometry};c.Workspace.cursorPos={x:200,y:20};
+    w.interactiveMoveResizeStarted.emit();
+    for(const [x,y,z] of [[.1,.1,'top-left'],[.5,.1,'top'],[.9,.9,'bottom-right'],[.5,.5,'center']]) {
+        c.Workspace.cursorPos={x:before.x+before.width*x,y:before.y+before.height*y};
+        w.frameGeometry={...before,x:before.x+30,y:before.y+40};
+        w.interactiveMoveResizeStepped.emit(w.frameGeometry);
+        assert.equal(c.previewZone,z);assert.equal(c.dragPreview.visible,true);
+        assert.deepEqual({...c.previewArea},before);
+        assert.deepEqual({...c.previewGeometry},{...c.emptyPart(before,z)});
+    }
+    // Escape: no fractional split is committed by merely hovering over it.
+    const tree=m.root;w.frameGeometry=before;w.interactiveMoveResizeFinished.emit();
+    assert.equal(m.root,tree);assert.equal(c.dragPreview.visible,false);assert.equal(c.interactiveWindows.size,0);
+});
+test('source-slot fractions preserve hidden occupants and never reinterpret a visible stack as empty',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true};
+    c.assign(m.root,hidden);const source=m.root,r=c.rects(m).get(source);
+    const p={x:r.x+r.width*.1,y:r.y+r.height*.1};
+    assert.equal(c.vacantForDrop(source,w),true);
+    assert.equal(c.drop(w,p,false),true);
+    assert.equal(c.allWindows(m.root).filter(other=>other===w).length,1);
+    assert.equal(c.allWindows(m.root).filter(other=>other===hidden).length,1);
+    assert.equal(hidden.minimized,true);
+    const visible={...w};c.assign(c.slotOf(w)[1],visible);
+    assert.equal(c.vacantForDrop(c.slotOf(w)[1],w),false);
+});
 test('undersized quarters fall back to a fitting half or full area',()=>{
     const c=backend(),w=window(c);w.minSize={width:400,height:300};
     const r={x:0,y:0,width:600,height:800};

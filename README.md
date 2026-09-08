@@ -140,6 +140,8 @@ quarters. The Plasma preview outlines the whole area, shows subdivision guides, 
 the selected portion. A quarter too small for the app falls back to a fitting half or the whole
 area; an area that cannot fit the app is labeled and leaves the layout unchanged on release.
 Hidden occupants remain hidden and are retained in the source slot when possible.
+On Plasma, the dragged window's own original slot also offers quarter/half/full placement;
+another visible window in the same stack still counts as occupied.
 New Plasma windows use visible free space (including slots held by minimized windows) before
 splitting occupied slots. A cramped focused slot is skipped when another slot can fit a split.
 The default gap is 1 logical pixel. Resizing fully into a vacancy absorbs its leftover strip
@@ -190,6 +192,11 @@ renderer; it does not use your desktop's display socket or inject global input. 
 live-test sequence did crash KWin and disrupt the desktop. See the
 [crash and verification record](docs/verification-0.2.5.md). Run the live-desktop harnesses
 below only in a disposable session; do not use them to stress-test a working desktop.
+
+For real pointer-driven hover/drop checks in that private session, run
+`node tests/plasma-isolated.cjs --native-drag` (add `--fractional-scale` for 125%).
+This verifies corner quarters, edge halves, full-space centers, release geometry, and Escape,
+including the dragged window's original slot. See [requirements and regression evidence](docs/verification-0.2.7.md).
 
 With Tilekeep running on Plasma, `python tests/tray-live.py --allow-settings-changes` exercises
 real tray callbacks for pause, gap, login startup, and snapshot save/load/startup selection.
