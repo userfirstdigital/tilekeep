@@ -16,6 +16,7 @@ function backend() {
         deferredPlacements:new Map(), interactiveWindows:new Set(), placementQueue:[], currentPlacement:null,
         placementAttempt:0, windowConnections:new Map(), sequence:1,pendingSnapshot:null,
         previewOwner:null,previewGeometry:null,dragPreview:{visible:false},resizeGuide:{visible:false},resizeGuides:[],
+        displayTransition:false,displayEpoch:0,displayFingerprint:'',displayStableTicks:0,displaySamples:[],pendingWindows:new Set(),deferredSnapshot:null,saveAfterDisplay:false,
         placementDeadline:timer(), placementSpacing:timer(), recoveryTimer:timer(),workAreaTimer:timer(),
         KWin:{MaximizeArea:0},
         Workspace:{currentDesktop:1,currentActivity:'test',raiseWindow(){},hideOutline(){}},
@@ -41,6 +42,151 @@ function window(c, {async=false}={}) {
     c.monitors.push(m);c.assign(m.root,w);c.connectWindow(w);
     return w;
 }
+function displayFixture(options={}) {
+    const c=backend(),w=window(c,options),m=c.monitors[0];
+    const output={name:'DP-3',enabled:true,area:{x:0,y:0,width:1000,height:800}};
+    m.name=output.name;m.output=output;m.online=true;w.output=output;
+    c.Workspace.screens=[output];c.Workspace.stackingOrder=[w];
+    c.Workspace.clientArea=(_kind,o)=>o.area;
+    c.Workspace.sendClientToScreen=(w,o)=>{w.output=o;};
+    return {c,w,m,output};
+}
+function settleDisplays(c) {for(let i=0;i<5;i++)c.workAreasChanged();}
+test('the observed DP-3 -> Placeholder-1 -> DP-3 wake sequence keeps the original tree and geometry',()=>{
+    const {c,w,m,output}=displayFixture();c.apply();
+    const tree=m.root,before={...w.frameGeometry};
+    const placeholder={name:'Placeholder-1',enabled:true,area:{x:0,y:0,width:1920,height:1080}};
+    c.Workspace.screens=[placeholder];w.output=placeholder;
+    c.beginDisplayTransition();settleDisplays(c);
+    assert.equal(c.displayTransition,true);assert.equal(m.root,tree);assert.equal(m.output,null);
+    assert.equal(c.monitors.length,1);assert.equal(c.placements().length,0);
+    // Simulate KWin itself relocating/shrinking the native client while disconnected.
+    w.frameGeometry={x:50,y:50,width:300,height:250};
+    const replacement={...output};c.Workspace.screens=[replacement];
+    settleDisplays(c);
+    assert.equal(c.displayTransition,false);assert.equal(m.root,tree);assert.equal(m.output,replacement);
+    assert.deepEqual({...w.frameGeometry},before);assert.equal(w.output,replacement);
+});
+test('pending, retry and direct geometry writes are blocked before screensChanged arrives',()=>{
+    const {c,w,m}=displayFixture({async:true});c.apply();assert.equal(c.currentPlacement.window,w);
+    const tree=m.root,request=w.requested;
+    c.Workspace.screens=[];
+    c.placementTimedOut();c.retryDeferredPlacements();c.placeNextWindow();c.placeWindow(w,{x:1,y:1,width:1,height:1});c.apply();
+    assert.equal(c.displayTransition,true);assert.equal(c.currentPlacement,null);assert.equal(c.placementQueue.length,0);
+    assert.equal(c.expectedGeometry.size,0);assert.equal(c.deferredPlacements.size,0);
+    assert.equal(w.requested,request);assert.equal(m.root,tree);
+});
+test('late panel work areas reset the wake debounce without scaling the retained tree early',()=>{
+    const {c,w,m,output}=displayFixture();c.apply();const oldArea={...m.area},tree=m.root;
+    c.beginDisplayTransition();c.Workspace.screens=[];settleDisplays(c);
+    const returning={...output,area:{...output.area,height:830}};c.Workspace.screens=[returning];
+    for(let i=0;i<4;i++)c.workAreasChanged();
+    assert.equal(c.displayTransition,true);assert.deepEqual({...m.area},oldArea);
+    returning.area={...output.area};
+    for(let i=0;i<4;i++)c.workAreasChanged();
+    assert.equal(c.displayTransition,true);assert.equal(m.root,tree);
+    c.workAreasChanged();assert.equal(c.displayTransition,false);
+    assert.deepEqual({...m.area},oldArea);assert.equal(m.root,tree);
+});
+test('clients opened and closed with no real monitor are reconciled once without stale references',()=>{
+    const {c,w,m,output}=displayFixture();c.Workspace.screens=[];c.beginDisplayTransition();settleDisplays(c);
+    const newcomer={managed:true,normalWindow:true,moveable:true,resizeable:true,caption:'new',output,frameGeometry:{x:1,y:1,width:100,height:100},setMaximize(){}};
+    c.appeared(newcomer);c.appeared(newcomer);
+    assert.equal(c.pendingWindows.size,1);assert.equal(c.slotOf(newcomer),null);
+    c.vanished(w);w.deleted=true;c.Workspace.stackingOrder=[newcomer];
+    c.Workspace.screens=[{...output}];settleDisplays(c);
+    assert.equal(c.pendingWindows.size,0);assert.equal(c.slotOf(w),null);
+    assert.equal(c.allWindows(m.root).filter(x=>x===newcomer).length,1);
+});
+test('a runtime starting on a placeholder waits for a real monitor before enrolling windows',()=>{
+    const {c,w,output}=displayFixture();c.monitors=[];
+    c.Workspace.screens=[{name:'Placeholder-1',area:{x:0,y:0,width:1920,height:1080}}];
+    c.syncMonitors();c.appeared(w);assert.equal(c.displayTransition,true);assert.equal(c.monitors.length,0);
+    c.Workspace.screens=[output];settleDisplays(c);
+    assert.equal(c.monitors.length,1);assert.ok(c.slotOf(w));assert.equal(c.monitors[0].name,'DP-3');
+});
+test('removing one of two monitors keeps both roots and restores the same membership on reconnect',()=>{
+    const {c,w,m,output}=displayFixture();
+    const secondOutput={name:'HDMI-A-1',enabled:true,area:{x:1000,y:0,width:1200,height:900}};
+    const second={name:secondOutput.name,output:secondOutput,area:secondOutput.area,online:true,root:c.leaf()};
+    c.monitors.push(second);c.Workspace.screens=[output,secondOutput];const tree=m.root,otherTree=second.root;
+    c.Workspace.screens=[secondOutput];c.beginDisplayTransition();settleDisplays(c);
+    assert.equal(m.online,false);assert.equal(m.root,tree);assert.equal(second.root,otherTree);assert.equal(c.slotOf(w)[0],m);
+    assert.equal(c.monitorForOutput(output),second);assert.equal(c.placements().length,0);
+    c.Workspace.screens=[secondOutput,{...output}];c.beginDisplayTransition();settleDisplays(c);
+    assert.equal(m.online,true);assert.equal(m.root,tree);assert.equal(second.root,otherTree);assert.equal(c.slotOf(w)[0],m);
+});
+test('repeated disconnects and replacement output objects do not accumulate monitors or duplicate windows',()=>{
+    const {c,w,m,output}=displayFixture();const tree=m.root;
+    for(let i=0;i<12;i++) {
+        c.Workspace.screens=[];c.beginDisplayTransition();settleDisplays(c);
+        c.Workspace.screens=[{...output}];settleDisplays(c);
+        assert.equal(c.monitors.length,1);assert.equal(m.root,tree);assert.equal(c.allWindows(tree).filter(x=>x===w).length,1);
+    }
+});
+test('a drag interrupted by unplugging cannot overwrite the preserved layout when Finished arrives late',()=>{
+    const {c,w,m,output}=displayFixture();c.apply();const tree=m.root,before={...w.frameGeometry};w.move=false;
+    w.interactiveMoveResizeStarted.emit();
+    c.Workspace.screens=[];c.beginDisplayTransition();settleDisplays(c);
+    w.frameGeometry={x:100,y:100,width:400,height:400};
+    c.Workspace.screens=[{...output}];settleDisplays(c);
+    w.interactiveMoveResizeFinished.emit();
+    assert.equal(m.root,tree);assert.deepEqual({...w.frameGeometry},before);
+});
+test('paused tiling stays paused across reconnect and resumes with the original layout',()=>{
+    const {c,w,m,output}=displayFixture();c.apply();const before={...w.frameGeometry},tree=m.root;c.setPaused(true);
+    c.Workspace.screens=[];c.beginDisplayTransition();settleDisplays(c);
+    w.frameGeometry={x:50,y:50,width:200,height:200};c.Workspace.screens=[{...output}];settleDisplays(c);
+    assert.equal(c.paused,true);assert.equal(w.frameGeometry.width,200);assert.equal(m.root,tree);
+    c.setPaused(false);assert.deepEqual({...w.frameGeometry},before);
+});
+test('native resize steps arriving before screensChanged cannot write geometry or alter the tree',()=>{
+    const {c,w,m}=displayFixture();c.apply();const tree=m.root,before={...w.frameGeometry};w.move=false;
+    w.interactiveMoveResizeStarted.emit();c.Workspace.screens=[];
+    w.interactiveMoveResizeStepped.emit({...before,width:before.width-100});
+    assert.equal(c.displayTransition,true);assert.deepEqual({...w.frameGeometry},before);
+    w.interactiveMoveResizeFinished.emit();assert.equal(m.root,tree);
+    assert.equal(c.slotAt({x:50,y:50}),null);assert.equal(c.interactiveWindows.size,0);
+});
+test('invalid and disabled outputs never replace a saved real-monitor area',()=>{
+    const {c,m,output}=displayFixture();const before={...m.area};
+    for(const bad of [{...output,enabled:false},{...output,area:{x:0,y:0,width:0,height:0}},{...output,area:{x:0,y:0,width:NaN,height:800}}]) {
+        c.Workspace.screens=[bad];c.beginDisplayTransition();settleDisplays(c);
+        assert.equal(c.displayTransition,true);assert.deepEqual({...m.area},before);
+    }
+});
+test('snapshot save and load requests wait until monitor recovery is stable',()=>{
+    const {c,output}=displayFixture();c.Workspace.screens=[];c.beginDisplayTransition();settleDisplays(c);
+    let saved=0,loaded=null;c.snapshotSave={call(){saved++;}};
+    c.saveSnapshot();c.restoreSnapshot('pending snapshot');assert.equal(saved,0);assert.equal(c.deferredSnapshot,'pending snapshot');
+    c.restoreSnapshot=s=>{loaded=s;};c.Workspace.screens=[{...output}];settleDisplays(c);
+    assert.equal(loaded,'pending snapshot');assert.equal(saved,1);assert.equal(c.saveAfterDisplay,false);
+});
+test('snapshot matching never duplicates an offline monitor tree onto an unmatched online output',()=>{
+    const {c,w,m,output}=displayFixture();w.internalId='a';
+    const saved={gap:1,windows:[{token:'a',app:'test',title:'test',rect:w.frameGeometry}],monitors:[{name:m.name,root:c.snapshotTree(m.root)}]};
+    const other={name:'HDMI-A-1',enabled:true,area:{x:0,y:0,width:1200,height:900}};
+    c.Workspace.screens=[other];c.beginDisplayTransition();settleDisplays(c);
+    c.snapshotRestored={call(){}};c.restoreSnapshot(JSON.stringify(saved));
+    assert.equal(c.monitors.length,2);assert.equal(c.slotOf(w)[0],m);assert.equal(m.online,false);
+    assert.equal(c.monitors.flatMap(m=>c.allWindows(m.root)).filter(x=>x===w).length,1);
+    assert.equal(c.placements().length,0);
+    c.Workspace.screens=[other,{...output}];c.beginDisplayTransition();settleDisplays(c);
+    assert.equal(c.slotOf(w)[0],m);assert.equal(c.placements().length,1);
+});
+test('a pending client closed while offline is not retained, and minimized and floating windows remain untouched',()=>{
+    const {c,w,m,output}=displayFixture();w.minimized=true;const before={...w.frameGeometry};
+    const extra={...w,minimized:false,internalId:'floating',frameGeometry:{x:25,y:30,width:200,height:200}};
+    c.floating.add(extra);c.Workspace.stackingOrder.push(extra);
+    c.Workspace.screens=[];c.beginDisplayTransition();settleDisplays(c);
+    const pending={...extra,internalId:'pending'};c.appeared(pending);assert.equal(c.pendingWindows.size,1);
+    c.vanished(pending);pending.deleted=true;assert.equal(c.pendingWindows.size,0);
+    c.Workspace.screens=[{...output}];settleDisplays(c);
+    assert.equal(w.minimized,true);assert.deepEqual({...w.frameGeometry},before);
+    assert.equal(c.floating.has(extra),true);assert.equal(c.slotOf(extra),null);
+    assert.deepEqual({...extra.frameGeometry},{x:25,y:30,width:200,height:200});
+    assert.equal(c.allWindows(m.root).length,1);
+});
 test('synchronous geometry completion disarms its deadline',()=>{
     const c=backend();const w=window(c);c.apply();
     assert.equal(c.currentPlacement,null);assert.equal(c.placementDeadline.running,false);

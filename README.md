@@ -84,8 +84,13 @@ uses a temporary KWin script because only the compositor is allowed to manage na
 windows; the script is loaded when `wm` starts and unloaded when it quits. `qdbus6` (normally
 installed with Plasma) is required. X11 uses the standard EWMH and RandR protocols directly.
 Only one Plasma integration instance runs at a time. Starting a second does not disturb the first.
-On Wayland, resize completion is asynchronous: when a display sleeps, pending placements are
-retained and reconciled after clients resume drawing. The app does not wake displays itself.
+On Wayland, resize completion is asynchronous: sleeping clients are reconciled after they
+resume drawing. If a monitor disconnects, its layout stays cached instead of being reassigned
+to another monitor or KWin's temporary placeholder display. Stale placement requests are
+cancelled; returning monitors and panel work areas must settle for two seconds before tiling
+resumes. Apps opened or closed during the interruption are reconciled afterward. These caches
+last for the running Plasma backend session and are matched by output name. The app does not
+wake displays itself. See [wake-recovery verification](docs/verification-0.2.4.md).
 
 The first build downloads and compiles the platform crate and can take a few minutes; subsequent
 builds are fast.

@@ -26,6 +26,7 @@ let app,loaded=false;
     await wait(700);if(app.exitCode!==null)throw Error(appErrors);
     let source=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
     source=source.replace('function tileable(w)','function productionTileable(w)').replace('function start()','function productionStart()').replace('function refreshWorkAreas()','function productionRefreshWorkAreas()');
+    source=source.replace('function displaysReady()','function productionDisplaysReady()').replace('function pollDisplays()','function productionPollDisplays()');
     source=source.replace('drag.raw=raw;',`console.log('${marker}','STEP',JSON.stringify({g,raw,before:drag.rect,cursor:Workspace.cursorPos,start:drag.cursor,edges:drag.edges}));drag.raw=raw;`)
         .replace('const final=windowRect(w);',`const final=windowRect(w);console.log('${marker}','FINISH',JSON.stringify({final,before:d.rect,raw:d.raw,requested:w.moveResizeGeometry}));`);
     const test=`
@@ -39,8 +40,11 @@ let app,loaded=false;
  property int ticks: 0
  property int nativeTicks: 0
  property bool sawNativeSnap: false
+ property var guideFocus: null
  function tileable(w){return w&&w.pid===${app.pid}&&String(w.caption).startsWith('${marker}')&&productionTileable(w);}
  function refreshWorkAreas(){return false;}
+ function displaysReady(){return true;}
+ function pollDisplays(){return false;}
  function check(ok,msg){if(!ok)throw Error(msg);}
  function verifyUsers(){for(const p of userWindows)if(!p.w.deleted)check(geometryMatches(windowRect(p.w),p.rect),'User window moved: '+identity(p.w));}
  function start(){
@@ -63,8 +67,8 @@ let app,loaded=false;
    if(root.phase===0){root.base=root.windowRect(root.a);root.fixed=root.windowRect(root.b);root.wanted=Object.assign({},root.base,{width:root.base.width+110});root.check(root.adjustRatio(root.a,root.base,root.wanted),'local resize rejected');root.apply();root.phase=1;return;}
    if(root.phase===1){root.check(root.geometryMatches(root.windowRect(root.a),root.wanted),'resized frame mismatch');root.check(root.geometryMatches(root.windowRect(root.b),root.fixed),'unrelated sibling changed');root.verifyUsers();console.log('${marker}','PASS local resize preserves unrelated windows');
      const bounds=root.inset(m.area),raw=Object.assign({},root.wanted,{width:Math.round(bounds.width*.75)+4});
-     const snap=root.resizeSnap(root.a,root.wanted,raw,['right']);root.check(snap.guides.length===1,'snap guide missing');root.showResizeGuide(root.a,snap);root.phase=2;return;}
-   if(root.phase===2){root.check(resizeGuide.visible,'native snap guide not visible');root.check(Workspace.activeWindow!==resizeGuide,'guide stole focus');root.hidePreview();console.log('${marker}','PASS real snap guide surface');
+     const snap=root.resizeSnap(root.a,root.wanted,raw,['right']);root.check(snap.guides.length===1,'snap guide missing');root.guideFocus=Workspace.activeWindow;root.showResizeGuide(root.a,snap);root.phase=2;return;}
+   if(root.phase===2){root.check(resizeGuide.visible,'native snap guide not visible');root.check(Workspace.activeWindow===root.guideFocus,'guide stole focus');root.hidePreview();console.log('${marker}','PASS real snap guide surface');
      const bounds=root.inset(m.area);root.base=Object.assign({},root.base,{width:Math.round(bounds.width*.75)-20});
      root.adjustRatio(root.a,root.wanted,root.base);root.apply();root.phase=3;return;}
    if(root.phase===3){root.check(root.geometryMatches(root.windowRect(root.a),root.base),'reset test geometry');Workspace.activeWindow=root.a;root.check(Workspace.activeWindow===root.a,'test focus');nativeResize.call();root.phase=4;return;}

@@ -30,6 +30,14 @@ Item {
     property int sequence: 1
     property var pendingSnapshot: null
     property var resizeGuides: []
+    property bool displayTransition: false
+    property int displayEpoch: 0
+    property string displayFingerprint: ""
+    property int displayStableTicks: 0
+    property var displaySamples: []
+    property var pendingWindows: new Set()
+    property var deferredSnapshot: null
+    property bool saveAfterDisplay: false
 
     function rect(r) { return {x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height)}; }
     function rectRight(r) { return r.x + r.width; }
@@ -154,10 +162,80 @@ Item {
         if (w.activities && w.activities.length && !w.activities.includes(Workspace.currentActivity)) return false;
         return true;
     }
-    function monitorForOutput(output) { return monitors.find(m => m.output === output) || monitors[0]; }
+    function monitorForOutput(output) { return monitors.find(m => m.online!==false&&m.output===output) || monitors.find(m=>m.online!==false); }
+    function readDisplayState() {
+        const out=[];
+        for(const output of Workspace.screens) {
+            try {
+                // KWin temporarily substitutes this synthetic 1920×1080 output
+                // when the last physical connector disappears. Never tile it.
+                const name=String(output.name||"");
+                if(!name||/^Placeholder(?:-|$)/i.test(name)||output.placeholder===true||output.enabled===false)continue;
+                const a=rect(Workspace.clientArea(KWin.MaximizeArea,output,Workspace.currentDesktop));
+                if(![a.x,a.y,a.width,a.height].every(Number.isFinite)||a.width<=0||a.height<=0)continue;
+                out.push({name,output,area:a});
+            }catch(e) { /* Output QObjects can disappear during a hotplug batch. */ }
+        }
+        return out;
+    }
+    function sameDisplays(samples) {
+        const active=monitors.filter(m=>m.online!==false);
+        return active.length===samples.length&&samples.every(s=>active.some(m=>m.name===s.name&&m.output===s.output));
+    }
+    function displaysReady() {
+        if(displayTransition)return false;
+        if(Workspace.screens!==undefined&&!sameDisplays(readDisplayState())){beginDisplayTransition();return false;}
+        return true;
+    }
+    function beginDisplayTransition() {
+        if(!displayTransition)console.log("Tilekeep: display transition; preserving real-monitor layouts");
+        displayTransition=true;displayEpoch++;displayStableTicks=0;displayFingerprint="";displaySamples=[];
+        placementDeadline.stop();placementSpacing.stop();
+        placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
+        interactiveWindows.clear();hidePreview();
+    }
+    function commitDisplays(samples) {
+        // Keep offline roots and window membership. Do not re-enroll those
+        // windows on another output just because KWin temporarily relocated them.
+        for(const m of monitors){m.online=false;m.output=null;}
+        for(const s of samples) {
+            const m=monitors.find(m=>m.name===s.name);
+            if(m){m.output=s.output;m.area=s.area;m.online=true;}
+            else monitors.push({name:s.name,output:s.output,area:s.area,online:true,root:leaf()});
+        }
+    }
+    function pollDisplays() {
+        // The optional guard also lets pure geometry fixtures omit a workspace.
+        if(Workspace.screens===undefined)return false;
+        const samples=readDisplayState();
+        if(!displayTransition&&!sameDisplays(samples))beginDisplayTransition();
+        if(!displayTransition)return false;
+        if(!samples.length) {
+            displayStableTicks=0;displayFingerprint="";displaySamples=[];
+            // Don't retain references to destroyed output objects while asleep.
+            for(const m of monitors){m.online=false;m.output=null;}
+            return true;
+        }
+        const fingerprint=JSON.stringify(samples.map(s=>[s.name,s.area.x,s.area.y,s.area.width,s.area.height]).sort((a,b)=>a[0].localeCompare(b[0])));
+        const sameObjects=samples.length===displaySamples.length&&samples.every(s=>displaySamples.some(p=>p.name===s.name&&p.output===s.output));
+        if(fingerprint!==displayFingerprint||!sameObjects){displayFingerprint=fingerprint;displayStableTicks=0;displaySamples=samples;return true;}
+        // Four quiet 500ms intervals include the panel's late strut restoration.
+        if(++displayStableTicks<4)return true;
+        commitDisplays(samples);displayTransition=false;displaySamples=[];
+        if(deferredSnapshot!==null){const saved=deferredSnapshot;deferredSnapshot=null;restoreSnapshot(saved);}
+        for(const w of Array.from(pendingWindows)){pendingWindows.delete(w);if(tileable(w))appeared(w);}
+        // Also discover clients opened before the runtime started with no outputs.
+        for(const w of Workspace.stackingOrder||[])if(tileable(w))appeared(w);
+        console.log("Tilekeep: display layout restored after stable work areas",samples.map(s=>s.name).join(", "));
+        apply();
+        if(saveAfterDisplay){saveAfterDisplay=false;saveSnapshot();}
+        return true;
+    }
     function refreshWorkAreas() {
+        if(displayTransition)return false;
         let changed=false;
         for(const m of monitors) {
+            if(m.online===false)continue;
             const a=rect(Workspace.clientArea(KWin.MaximizeArea,m.output,Workspace.currentDesktop)),old=m.area;
             if(a.x!==old.x||a.y!==old.y||a.width!==old.width||a.height!==old.height) {
                 m.area=a;changed=true;
@@ -166,25 +244,22 @@ Item {
         return changed;
     }
     function workAreasChanged() {
-        if(!enabled||interactiveWindows.size)return;
+        if(!enabled)return;
+        if(pollDisplays()||interactiveWindows.size)return;
         if(refreshWorkAreas())apply();
     }
     function syncMonitors() {
-        const old = monitors, next=[];
-        for (const output of Workspace.screens) {
-            const existing=old.find(m=>m.name===output.name);
-            const a=rect(Workspace.clientArea(KWin.MaximizeArea,output,Workspace.currentDesktop));
-            next.push(existing ? Object.assign(existing,{output,area:a}) : {name:output.name,output,area:a,root:leaf()});
-        }
-        const gone=[];
-        for (const m of old) if (!next.includes(m)) for (const w of allWindows(m.root)) gone.push(w);
-        monitors=next;
-        if (monitors.length) for (const w of gone) appeared(w);
+        const samples=readDisplayState();
+        if(!monitors.length&&samples.length&&!displayTransition){commitDisplays(samples);return;}
+        if(!samples.length&&!displayTransition)beginDisplayTransition();
+        if(!displayTransition&&!sameDisplays(samples))beginDisplayTransition();
+        if(!displayTransition)refreshWorkAreas();
     }
     function assign(slot,w) { slot.windows.push(w); slot.active=slot.windows.length-1; slot.vacated=null; slot.remembered=null; }
     function appeared(w) {
+        if(!tileable(w)||slotOf(w)||floating.has(w))return false;
+        if(!displaysReady()||!monitors.some(m=>m.online!==false)){pendingWindows.add(w);return false;}
         if(pendingSnapshot&&restorePendingWindow(w))return true;
-        if (!tileable(w) || slotOf(w) || floating.has(w)) return false;
         const m=monitorForOutput(w.output); if (!m) return false;
         const id=identity(w); identities.set(w,id);
         // Visually free slots can still contain minimized/off-desktop windows.
@@ -192,7 +267,7 @@ Item {
         // splitting an occupied slot, even when focus points at a small stack.
         const added=leaf();added.windows=[w];const min=minimumSize(added);
         const candidates=[];
-        for(const monitor of [m,...monitors.filter(other=>other!==m)]) {
+        for(const monitor of [m,...monitors.filter(other=>other!==m&&other.online!==false)]) {
             const bounds=rects(monitor);
             for(const slot of leaves(monitor.root)) {
                 const r=bounds.get(slot);
@@ -236,6 +311,7 @@ Item {
         else { if(i<s.active)s.active--; s.active=Math.min(s.active,s.windows.length-1); }
     }
     function vanished(w) {
+        pendingWindows.delete(w);
         hidePreview(w);
         detach(w);floating.delete(w);identities.delete(w);expectedGeometry.delete(w);
         deferredPlacements.delete(w);interactiveWindows.delete(w);
@@ -246,6 +322,7 @@ Item {
     function placements() {
         const out=[];
         for (const m of monitors) {
+            if(m.online===false)continue;
             const map=rects(m);
             for (const s of leaves(m.root)) {
                 const stack=s.windows.filter(w=>visibleHere(w)).length>1;
@@ -255,6 +332,7 @@ Item {
         return out.sort((a,b)=>Number(a.active)-Number(b.active));
     }
     function placeWindow(w,r) {
+        if(!displaysReady())return;
         if(w.tile) w.tile.unmanage(w);
         w.setMaximize(false,false);
         const next=Object.assign({},w.frameGeometry);
@@ -262,7 +340,7 @@ Item {
         w.frameGeometry=next;
     }
     function apply() {
-        if (!enabled || paused || interactiveWindows.size) return;
+        if (!enabled || paused || !displaysReady() || interactiveWindows.size) return;
         refreshWorkAreas();
         const next=placements();
         placementDeadline.stop();placementSpacing.stop();
@@ -278,7 +356,7 @@ Item {
         if(!dryRun) placeNextWindow();
     }
     function placeNextWindow() {
-        if(!enabled||currentPlacement||!placementQueue.length)return;
+        if(!enabled||!displaysReady()||currentPlacement||!placementQueue.length)return;
         currentPlacement=placementQueue.shift();placementAttempt=0;
         const p=currentPlacement;
         if(!tileable(p.window)||!visibleHere(p.window)||floating.has(p.window)) { finishCurrentPlacement();return; }
@@ -307,7 +385,7 @@ Item {
         return got&&wanted&&Math.abs(got.x-wanted.x)<=t&&Math.abs(got.y-wanted.y)<=t&&Math.abs(got.width-wanted.width)<=t&&Math.abs(got.height-wanted.height)<=t;
     }
     function retryDeferredPlacements() {
-        if(!enabled||dryRun||interactiveWindows.size||currentPlacement||placementQueue.length)return;
+        if(!enabled||dryRun||!displaysReady()||interactiveWindows.size||currentPlacement||placementQueue.length)return;
         for(const [w,p] of deferredPlacements) {
             if(tileable(w)&&visibleHere(w)&&!floating.has(w)&&slotOf(w)&&!geometryMatches(windowRect(w),p.rect))placementQueue.push(p);
         }
@@ -315,6 +393,7 @@ Item {
         placeNextWindow();
     }
     function placementTimedOut() {
+        if(!displaysReady())return;
         const p=currentPlacement;if(!p)return;
         if(!tileable(p.window)||!visibleHere(p.window)||floating.has(p.window)) { finishCurrentPlacement();return; }
         const got=windowRect(p.window);
@@ -336,7 +415,8 @@ Item {
         return dx*dx+dy*dy;
     }
     function slotAt(p) {
-        const m=monitors.find(m=>contains(m.area,p)); if(!m)return null;
+        if(!displaysReady())return null;
+        const m=monitors.find(m=>m.online!==false&&contains(m.area,p)); if(!m)return null;
         const map=rects(m), ls=leaves(m.root).filter(s=>area(map.get(s))>0), s=ls.find(s=>contains(map.get(s),p))||ls.sort((a,b)=>distance(map.get(a),p)-distance(map.get(b),p))[0];
         if(!s)return null;
         return [m,s,map.get(s)];
@@ -498,6 +578,7 @@ Item {
     }
     function resizeLayout(w,before,after) {
         const found=slotOf(w);if(!found)return null;
+        if(!displaysReady()||found[0].online===false)return null;
         const [m,slot]=found,map=rects(m),bounds=inset(m.area),target=rect(after),edges=resizeEdges(before,after);
         const items=leaves(m.root).filter(s=>s===slot||!vacantHere(s)).map(s=>({slot:s,rect:Object.assign({},s===slot?target:map.get(s))}));
         if(!edges.length)return null;
@@ -613,7 +694,7 @@ Item {
     }
     function compact(m) { m.root=compactNode(m.root);m.root.parent=null; }
     function cycle(delta) {
-        if(paused)return;
+        if(paused||!displaysReady())return;
         const f=focused&&slotOf(focused);if(!f||f[1].windows.length<2)return;
         const s=f[1],visible=s.windows.filter(w=>visibleHere(w));if(visible.length<2)return;
         const next=(visible.indexOf(focused)+delta+visible.length)%visible.length;
@@ -656,13 +737,14 @@ Item {
         };
         handlers.started=()=>{
             hidePreview();
+            if(!displaysReady()){drag=null;return;}
             interactiveWindows.add(w);
             placementDeadline.stop();placementSpacing.stop();
             placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
-            if(!paused&&tileable(w)&&!floating.has(w))drag={rect:windowRect(w),moving:w.move,cursor:Workspace.cursorPos?{x:Workspace.cursorPos.x,y:Workspace.cursorPos.y}:null,edges:[],raw:null};
+            if(!paused&&!displayTransition&&tileable(w)&&!floating.has(w))drag={epoch:displayEpoch,rect:windowRect(w),moving:w.move,cursor:Workspace.cursorPos?{x:Workspace.cursorPos.x,y:Workspace.cursorPos.y}:null,edges:[],raw:null};
         };
         handlers.stepped=g=>{
-            if(!drag||paused)return;
+            if(!drag||paused||!displaysReady()||drag.epoch!==displayEpoch)return;
             if(!drag.moving) {
                 const changed=resizeEdges(drag.rect,g);
                 // Wayland's first step can still report the old committed frame.
@@ -696,7 +778,7 @@ Item {
         };
         handlers.finished=()=>{
             interactiveWindows.delete(w);
-            hidePreview(w);if(!drag||paused){drag=null;apply();return;}
+            hidePreview(w);if(!drag||paused||!displaysReady()||drag.epoch!==displayEpoch){drag=null;apply();return;}
             const d=drag;drag=null;
             // KWin restores the starting geometry before emitting Finished when
             // Escape cancels a drag. The cursor can still be over another slot.
@@ -744,7 +826,7 @@ Item {
         detach(w);assign(hit[1],w);focused=w;apply();
     }
     function unstack(w) {
-        if(paused||interactiveWindows.size)return false;
+        if(paused||!displaysReady()||interactiveWindows.size)return false;
         const found=slotOf(w);if(!found||found[1].windows.length<2)return false;
         detach(w);appeared(w);apply();return true;
     }
@@ -769,6 +851,7 @@ Item {
         return {kind:"split",axis:node.axis,ratio:node.ratio,preserveSpace:!!node.preserveSpace,first:snapshotTree(node.first),second:snapshotTree(node.second)};
     }
     function saveSnapshot() {
+        if(!displaysReady()){saveAfterDisplay=true;return;}
         const snapshot={schema:1,gap,windows:snapshotWindows(),monitors:monitors.map(m=>({name:m.name,area:m.area,root:snapshotTree(m.root)}))};
         snapshotSave.arguments=[JSON.stringify(snapshot)];snapshotSave.call();
     }
@@ -785,6 +868,7 @@ Item {
         return true;
     }
     function restoreSnapshot(json) {
+        if(displayTransition){deferredSnapshot=json;return;}
         if(interactiveWindows.size){console.log("Tilekeep: finish dragging before loading a snapshot");return;}
         const saved=JSON.parse(json),available=Workspace.stackingOrder.filter(w=>tileable(w)),used=new Set(),byToken=new Map();
         const entries=saved.windows.map(app=>{
@@ -799,9 +883,12 @@ Item {
             }
             const s={kind:"split",axis:n.axis,ratio:n.ratio,preserveSpace:!!n.preserveSpace,parent};s.first=tree(n.first,s);s.second=tree(n.second,s);return s;
         }
-        syncMonitors();floating.clear();gap=saved.gap;
+        syncMonitors();if(displayTransition){deferredSnapshot=json;return;}floating.clear();gap=saved.gap;
+        const named=new Map(monitors.map(m=>[m,saved.monitors.find(s=>s.name===m.name)]));
+        const usedMonitors=new Set(Array.from(named.values()).filter(Boolean));
         for(let i=0;i<monitors.length;i++) {
-            const m=monitors[i],old=saved.monitors.find(s=>s.name===m.name)||saved.monitors[i];
+            const m=monitors[i],old=named.get(m)||(m.online!==false?saved.monitors.find(s=>!usedMonitors.has(s)):null);
+            if(old)usedMonitors.add(old);
             m.root=old?tree(old.root,null):leaf();
         }
         // Extra windows are left open at their existing positions, outside the
@@ -816,6 +903,7 @@ Item {
         // A runtime upgrade must not retile an already valid desktop. Rebuild
         // from actual frames, including user adjustments made while stopped.
         for(const m of monitors) {
+            if(m.online===false)continue;
             const bounds=inset(m.area),windows=allWindows(m.root),items=[];
             for(const w of windows.filter(w=>visibleHere(w))) {
                 const s=leaf();s.windows=[w];items.push({slot:s,rect:windowRect(w)});
@@ -849,7 +937,7 @@ Item {
         function onWindowAdded(w) { root.connectWindow(w);if(root.appeared(w))root.apply(); }
         function onWindowRemoved(w) { root.disconnectWindow(w);root.vanished(w);root.apply(); }
         function onWindowActivated(w) { if(w){if(root.appeared(w))root.apply();root.focused=w;const f=root.slotOf(w);if(f)f[1].active=f[1].windows.indexOf(w);} }
-        function onScreensChanged() { root.syncMonitors();root.apply(); }
+        function onScreensChanged() { root.beginDisplayTransition(); }
         function onCurrentDesktopChanged() { root.apply(); }
         function onCurrentActivityChanged() { root.apply(); }
     }
@@ -919,10 +1007,10 @@ Item {
         }
     }
 
-    ShortcutHandler { name: "TilekeepCompact"; text: "Tilekeep: compact monitor"; sequence: "Meta+Shift+K"; onActivated: { if(root.paused)return;const m=root.monitorForOutput(Workspace.screenAt(Workspace.cursorPos)); if(m){root.compact(m);root.apply();} } }
+    ShortcutHandler { name: "TilekeepCompact"; text: "Tilekeep: compact monitor"; sequence: "Meta+Shift+K"; onActivated: { if(root.paused||!root.displaysReady())return;const m=root.monitorForOutput(Workspace.screenAt(Workspace.cursorPos)); if(m){root.compact(m);root.apply();} } }
     ShortcutHandler { name: "TilekeepRetile"; text: "Tilekeep: re-tile windows"; sequence: "Meta+Shift+L"; onActivated: { root.syncMonitors();root.apply(); } }
     ShortcutHandler { name: "TilekeepUnstack"; text: "Tilekeep: unstack active window"; onActivated: root.unstack(Workspace.activeWindow) }
-    ShortcutHandler { name: "TilekeepFloat"; text: "Tilekeep: toggle floating"; sequence: "Meta+Shift+F"; onActivated: { if(root.paused)return;const w=Workspace.activeWindow;if(!w)return;if(root.floating.has(w)){root.floating.delete(w);root.appeared(w);}else{root.detach(w);root.floating.add(w);}root.apply(); } }
+    ShortcutHandler { name: "TilekeepFloat"; text: "Tilekeep: toggle floating"; sequence: "Meta+Shift+F"; onActivated: { if(root.paused||!root.displaysReady())return;const w=Workspace.activeWindow;if(!w)return;if(root.floating.has(w)){root.floating.delete(w);root.appeared(w);}else{root.detach(w);root.floating.add(w);}root.apply(); } }
     // A fresh action id avoids loading the old saved Meta+Shift+S binding,
     // which conflicts with Spectacle's default screenshot shortcut.
     ShortcutHandler { name: "TilekeepStackAtCursor"; text: "Tilekeep: stack at cursor"; sequence: "Meta+Shift+G"; onActivated: root.stackAtCursor() }
