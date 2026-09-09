@@ -92,7 +92,8 @@ pub fn longest_axis(rect: Rect) -> SplitAxis {
     }
 }
 
-/// Empty spaces offer a full center, edge halves and corner quarters.
+/// The central 70% of each dimension selects the full empty space;
+/// outer 15% bands select edge halves and corner quarters.
 pub fn empty_splits(rect: Rect, p: Point) -> Vec<(SplitAxis, bool)> {
     if rect.w <= 0 || rect.h <= 0 {
         return Vec::new();
@@ -100,10 +101,10 @@ pub fn empty_splits(rect: Rect, p: Point) -> Vec<(SplitAxis, bool)> {
     let x = (p.x - rect.x) as f64 / rect.w as f64;
     let y = (p.y - rect.y) as f64 / rect.h as f64;
     let mut splits = Vec::new();
-    if !(0.25..=0.75).contains(&x) {
+    if !(0.15..=0.85).contains(&x) {
         splits.push((SplitAxis::X, x < 0.5));
     }
-    if !(0.25..=0.75).contains(&y) {
+    if !(0.15..=0.85).contains(&y) {
         splits.push((SplitAxis::Y, y < 0.5));
     }
     splits
@@ -204,6 +205,25 @@ mod tests {
         assert_eq!(longest_axis(Rect::new(0, 0, 1000, 500)), SplitAxis::X);
         assert_eq!(longest_axis(Rect::new(0, 0, 500, 1000)), SplitAxis::Y);
         assert_eq!(longest_axis(Rect::new(0, 0, 500, 500)), SplitAxis::X);
+    }
+    #[test]
+    fn empty_space_full_target_spans_central_seventy_percent() {
+        let r = Rect::new(-500, 30, 1000, 1000);
+        for x in [150, 200, 500, 800, 850] {
+            for y in [150, 200, 500, 800, 850] {
+                assert!(empty_splits(r, Point { x: r.x + x, y: r.y + y }).is_empty());
+            }
+        }
+        assert_eq!(empty_splits(r, Point { x: r.x + 149, y: r.y + 500 }), vec![(SplitAxis::X, true)]);
+        assert_eq!(empty_splits(r, Point { x: r.x + 851, y: r.y + 500 }), vec![(SplitAxis::X, false)]);
+        assert_eq!(
+            empty_splits(r, Point { x: r.x + 149, y: r.y + 149 }),
+            vec![(SplitAxis::X, true), (SplitAxis::Y, true)]
+        );
+        assert_eq!(
+            empty_splits(r, Point { x: r.x + 851, y: r.y + 851 }),
+            vec![(SplitAxis::X, false), (SplitAxis::Y, false)]
+        );
     }
 
     #[test]

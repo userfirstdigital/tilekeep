@@ -440,6 +440,23 @@ test('undersized quarters fall back to a fitting half or full area',()=>{
     w.minSize={width:400,height:600};assert.equal(c.fittingEmptyZone(w,r,'top-left'),'center');
     w.minSize={width:700,height:600};assert.equal(c.fittingEmptyZone(w,r,'top-left'),'unavailable');
 });
+test('full-space hover occupies the central 70 percent, with narrow edge and corner targets',()=>{
+    const c=backend(),r={x:-500,y:30,width:1000,height:800};
+    for(const x of [.15,.2,.5,.8,.85])for(const y of [.15,.2,.5,.8,.85])
+        assert.equal(c.emptyZone(r,{x:r.x+x*r.width,y:r.y+y*r.height}),'center',`${x},${y}`);
+    for(const [x,y,z] of [[.149,.5,'left'],[.851,.5,'right'],[.5,.149,'top'],[.5,.851,'bottom'],[.149,.149,'top-left'],[.851,.851,'bottom-right']])
+        assert.equal(c.emptyZone(r,{x:r.x+x*r.width,y:r.y+y*r.height}),z);
+});
+test('minimum fit uses application hints plus decorations, not its current large size',()=>{
+    const c=backend(),w=window(c);w.minSize={width:200,height:100};
+    w.frameGeometry={x:0,y:0,width:1000,height:800};w.clientGeometry={x:4,y:30,width:992,height:766};
+    const r={x:10,y:10,width:430,height:280}; // quarter = 210x135, minimum frame = 208x134
+    assert.equal(c.fittingEmptyZone(w,r,'top-left'),'top-left');
+    w.minSize.width=203; // minimum frame width 211 no longer fits the quarter
+    assert.equal(c.fittingEmptyZone(w,r,'top-left'),'top');
+    w.minSize.height=250; // even the full frame is now too short
+    assert.equal(c.fittingEmptyZone(w,r,'top-left'),'unavailable');
+});
 test('an undersized vacancy rejects the drop without rearranging neighbors',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],other={};
     w.minSize={width:600,height:500};c.splitSlot(m,m.root,'x',false,other);

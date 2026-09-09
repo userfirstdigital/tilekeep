@@ -445,8 +445,10 @@ Item {
     function vacantForDrop(slot,w) { return !slot.windows.some(other=>other!==w&&visibleHere(other)); }
     function emptyZone(r,p) {
         const x=(p.x-r.x)/r.width,y=(p.y-r.y)/r.height;
-        const horizontal=x<.25?"left":x>.75?"right":"";
-        const vertical=y<.25?"top":y>.75?"bottom":"";
+        // Full-space placement is the default across the central 70% of each
+        // dimension. Halves/quarters require an intentional edge/corner hover.
+        const horizontal=x<.15?"left":x>.85?"right":"";
+        const vertical=y<.15?"top":y>.85?"bottom":"";
         return vertical&&horizontal?vertical+"-"+horizontal:horizontal||vertical||"center";
     }
     function emptyPart(r,z) {

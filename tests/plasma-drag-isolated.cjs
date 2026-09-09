@@ -52,15 +52,18 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
    }
    if(root.dragPhase===1){
      root.sourceRect=root.windowRect(root.testA);root.fixedRect=root.windowRect(root.testB);
-     root.targetRect=root.dragCase<9||root.dragCase===18?root.rects(m).get(root.slotOf(root.testA)[1]):root.rects(m).get(m.root.second);
-     const index=root.dragCase%9,x=[.1,.5,.9][index%3],y=[.1,.5,.9][Math.floor(index/3)],r=root.targetRect;
+     root.targetRect=root.dragCase<9||root.dragCase===18||(root.dragCase>=19&&root.dragCase<23)?root.rects(m).get(root.slotOf(root.testA)[1]):root.rects(m).get(m.root.second);
+     const index=root.dragCase%9,r=root.targetRect;
+     const x=root.dragCase>=19?[.2,.8][(root.dragCase-19)%2]:[.1,.5,.9][index%3];
+     const y=root.dragCase>=19?[.2,.8][Math.floor((root.dragCase-19)%4/2)]:[.1,.5,.9][Math.floor(index/3)];
      const p={x:r.x+r.width*x,y:r.y+r.height*y};
-     root.wantedZone=root.fittingEmptyZone(root.testA,r,root.emptyZone(r,p));root.wantedRect=root.emptyPart(r,root.wantedZone);
+     root.wantedZone=root.dragCase>=19?'center':root.fittingEmptyZone(root.testA,r,root.emptyZone(r,p));root.wantedRect=root.emptyPart(r,root.wantedZone);
      console.log('TKDRAG READY',JSON.stringify({case:root.dragCase,start:{x:root.sourceRect.x+root.sourceRect.width*.4,y:root.sourceRect.y+12},point:p}));root.dragPhase=2;root.dragTicks=0;return;
    }
    if(root.dragPhase===2){
      if(!root.testA.move||!dragPreview.visible||root.dragTicks<8)return;
      if(root.dragCase===0)dragPreview.contentItem.grabToImage(result=>result.saveToFile('${rootDir}/hover.png'));
+     if(root.dragCase===19)dragPreview.contentItem.grabToImage(result=>result.saveToFile('${rootDir}/hover-full.png'));
      root.dragCheck(root.previewZone===root.wantedZone,'hover zone mismatch '+JSON.stringify({expected:root.wantedZone,actual:root.previewZone}));
      root.dragCheck(root.geometryMatches(root.previewGeometry,root.wantedRect,1),'hover extent mismatch');
      root.dragCheck(root.geometryMatches(root.previewArea,root.targetRect,1),'full-space guides missing');
@@ -74,7 +77,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'unrelated window moved');
      root.dragCheck(!dragPreview.visible,'preview survived release');
      console.log('TKDRAG PASS',root.dragCase);root.dragCase++;root.dragTicks=0;
-     if(root.dragCase===19){console.log('TKDRAG DONE');this.stop();}else root.dragPhase=0;
+     if(root.dragCase===27){console.log('TKDRAG DONE');this.stop();}else root.dragPhase=0;
    }
  }catch(e){console.log('TKDRAG FAIL',String(e));this.stop();}}}
  `;
@@ -98,7 +101,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
                     if(line.includes('HOVER 18 ')){await send('key 1 1');await send('key 1 0');}
                     await send('button 0');
                 } else if(line.includes('TKDRAG DONE')) {
-                    console.log('PASS 18 native drag/hover/drop targets plus Escape; quarter/half/full guides verified');return;
+                    console.log('PASS 26 native drag/hover/drop targets plus Escape; expanded full-space target verified');return;
                 }
             }
         }
