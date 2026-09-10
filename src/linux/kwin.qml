@@ -279,6 +279,7 @@ Item {
     function appeared(w) {
         if(!tileable(w)||slotOf(w)||floating.has(w))return false;
         if(!displaysReady()||!monitors.some(m=>m.online!==false)){pendingWindows.add(w);return false;}
+        pendingWindows.delete(w);
         if(pendingSnapshot&&restorePendingWindow(w))return true;
         const m=monitorForOutput(w.output); if (!m) return false;
         const id=identity(w); identities.set(w,id);
@@ -323,6 +324,15 @@ Item {
         }
         console.log("Tilekeep: tracking",id,String(w.caption));
         return true;
+    }
+    function enrollWindows() {
+        if(!enabled||paused||!displaysReady())return;
+        let changed=false;
+        // Some apps publish their taskbar/normal-window metadata just after
+        // KWin emits windowAdded. Pick them up once they become eligible while
+        // preserving the explicit floating set.
+        for(const w of Workspace.stackingOrder)if(tileable(w)&&!slotOf(w)&&!floating.has(w))changed=appeared(w)||changed;
+        if(changed)apply();
     }
     function detach(w) {
         const found=slotOf(w); if (!found) return;
@@ -649,7 +659,7 @@ Item {
         const s={kind:"split",axis:c.axis,ratio:(c.p-bounds[c.axis])/Math.max(1,(c.axis==="x"?bounds.width:bounds.height)-gap),preserveSpace:true,first,second,parent:null};
         first.parent=s;second.parent=s;return s;
     }
-    function resizeLayout(w,before,after) {
+    function resizeLayout(w,before,after,free) {
         const found=slotOf(w);if(!found)return null;
         if(!displaysReady()||found[0].online===false)return null;
         const [m,slot]=found,map=rects(m),bounds=inset(m.area),target=rect(after),edges=resizeEdges(before,after);
@@ -667,6 +677,31 @@ Item {
             const horizontal=e==="left"||e==="right",leading=e==="left"||e==="top";
             const opposite=e==="left"?"right":e==="right"?"left":e==="top"?"bottom":"top";
             const position=edgePosition(before,e),offset=leading?-gap:gap;
+            if(free) {
+                // Free resize leaves windows sharing this side of the edge
+                // untouched. Only windows actually crossed on the far side
+                // yield, including after an intentional vacant strip.
+                let p=edgePosition(target,e),direct=[];
+                const growing=leading?p<position:p>position;
+                if(growing)direct=items.filter(item=>item.slot!==slot).map(item=>{
+                    const old=map.get(item.slot),near=edgePosition(old,opposite);
+                    const overlap=horizontal?Math.min(rectBottom(target),rectBottom(old))-Math.max(target.y,old.y):
+                        Math.min(rectRight(target),rectRight(old))-Math.max(target.x,old.x);
+                    const beyond=leading?near<=position-gap+2:near>=position+gap-2;
+                    const crossed=leading?near>p-gap:near<p+gap;
+                    return {item,old,edge:opposite,offset,near,hit:overlap>0&&beyond&&crossed};
+                }).filter(c=>c.hit);
+                for(const c of direct) {
+                    const min=minimumSize(c.item.slot),size=Math.max(1,horizontal?min.width:min.height);
+                    const near=c.edge==="left"||c.edge==="top";
+                    const limit=(near?edgePosition(c.old,horizontal?"right":"bottom")-size:
+                        edgePosition(c.old,horizontal?"left":"top")+size)-c.offset;
+                    p=near?Math.min(p,limit):Math.max(p,limit);
+                }
+                setEdge(target,e,p);
+                for(const c of direct)setEdge(c.item.rect,c.edge,p+c.offset);
+                continue;
+            }
             const segments=[{low:horizontal?before.y:before.x,high:horizontal?rectBottom(before):rectRight(before),side:0}];
             const candidates=items.filter(item=>item.slot!==slot).map(item=>{
                 const old=map.get(item.slot),same=Math.abs(edgePosition(old,e)-position)<=2;
@@ -716,8 +751,8 @@ Item {
         }
         return {monitor:m,tree,rect:target};
     }
-    function adjustRatio(w,before,after) {
-        const plan=resizeLayout(w,before,after);if(!plan)return false;
+    function adjustRatio(w,before,after,free) {
+        const plan=resizeLayout(w,before,after,free);if(!plan)return false;
         plan.monitor.root=plan.tree;return true;
     }
     function restoreResizePreview() {
@@ -731,18 +766,18 @@ Item {
             if(enabled&&!paused&&displaysReady()&&d.epoch===displayEpoch&&tileable(w)) {
                 const final=windowRect(w);
                 if(!geometryMatches(final,d.rect)) {
-                    const bounded=constrainedResize(w,d.rect,d.raw||final);
-                    const snap=resizeSnap(w,d.rect,bounded,d.edges.length?d.edges:resizeEdges(d.rect,final));
-                    adjustRatio(w,d.rect,snap.rect);
+                    const bounded=constrainedResize(w,d.rect,d.raw||final,d.free);
+                    const snap=resizeSnap(w,d.rect,bounded,d.edges.length?d.edges:resizeEdges(d.rect,final),d.free);
+                    adjustRatio(w,d.rect,snap.rect,d.free);
                 }
             }
             interactiveWindows.delete(w);
         }
         pendingResizeEnds.clear();resizePreviewWindows.clear();apply();
     }
-    function previewResizeNeighbors(w,before,after) {
+    function previewResizeNeighbors(w,before,after,free) {
         if(dryRun)return;
-        const plan=resizeLayout(w,before,after);
+        const plan=resizeLayout(w,before,after,free);
         if(!plan){restoreResizePreview();return;}
         const desired=new Map(),old=rects(plan.monitor),next=new Map();compute(plan.tree,inset(plan.monitor.area),next);
         for(const s of leaves(plan.tree)) {
@@ -759,20 +794,20 @@ Item {
             if(!geometryMatches(windowRect(other),r))placeWindow(other,r);
         }
     }
-    function constrainedResize(w,before,after) {
-        const plan=resizeLayout(w,before,after);if(plan)return plan.rect;
+    function constrainedResize(w,before,after,free) {
+        const plan=resizeLayout(w,before,after,free);if(plan)return plan.rect;
         // Stop at the last valid local layout instead of reverting the whole
         // gesture on release. Never move distant windows to force a fit.
         let low=0,high=1,result=Object.assign({},before);
         for(let i=0;i<12;i++) {
             const t=(low+high)/2,candidate={};
             for(const key of ["x","y","width","height"])candidate[key]=Math.round(before[key]+(after[key]-before[key])*t);
-            const next=resizeLayout(w,before,candidate);
+            const next=resizeLayout(w,before,candidate,free);
             if(next){low=t;result=next.rect;}else high=t;
         }
         return result;
     }
-    function resizeSnap(w,before,after,edges) {
+    function resizeSnap(w,before,after,edges,free) {
         const found=slotOf(w);if(!found)return {rect:after,guides:[]};
         const [m,slot]=found,bounds=inset(m.area),map=rects(m),result=rect(after),guides=[];
         const space=Object.assign({},bounds);
@@ -803,7 +838,7 @@ Item {
             if(nearest){setEdge(result,e,nearest.p);guides.push({edge:e,pos:nearest.p,label:nearest.label});}
         }
         // Never advertise a snap which the final constrained layout can't honor.
-        const plan=guides.length?resizeLayout(w,before,result):null;
+        const plan=guides.length?resizeLayout(w,before,result,free):null;
         if(!plan||!geometryMatches(plan.rect,result,0))return {rect:after,guides:[]};
         return {rect:result,guides};
     }
@@ -885,8 +920,17 @@ Item {
             placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
             if(!paused&&!displayTransition&&tileable(w)&&!floating.has(w)) {
                 drag={epoch:displayEpoch,rect:windowRect(w),moving:w.move,cursor:Workspace.cursorPos?{x:Workspace.cursorPos.x,y:Workspace.cursorPos.y}:null,edges:[],raw:null,free:false};
-                if(drag.moving)queryFreeModifier(value=>{if(drag)drag.free=value;},false);
+                queryFreeModifier(value=>{if(drag)drag.free=value;},false);
             }
+        };
+        handlers.resizePreview=()=>{
+            if(!drag||drag.moving||!drag.raw||paused||!displaysReady()||drag.epoch!==displayEpoch)return;
+            const bounded=constrainedResize(w,drag.rect,drag.raw,drag.free),snap=resizeSnap(w,drag.rect,bounded,drag.edges,drag.free);
+            showResizeGuide(w,snap);
+            previewResizeNeighbors(w,drag.rect,snap.rect,drag.free);
+            // The cursor remains free; each step is measured from its original
+            // position, never from the last snapped client geometry.
+            if(!geometryMatches(windowRect(w),snap.rect,0)&&!dryRun)w.frameGeometry=snap.rect;
         };
         handlers.stepped=g=>{
             if(!drag||paused||!displaysReady()||drag.epoch!==displayEpoch)return;
@@ -908,12 +952,8 @@ Item {
                     for(const e of drag.edges)setEdge(raw,e,edgePosition(drag.rect,e)+(e==="left"||e==="right"?Workspace.cursorPos.x-drag.cursor.x:Workspace.cursorPos.y-drag.cursor.y));
                 }
                 drag.raw=raw;
-                const bounded=constrainedResize(w,drag.rect,raw),snap=resizeSnap(w,drag.rect,bounded,drag.edges);
-                showResizeGuide(w,snap);
-                previewResizeNeighbors(w,drag.rect,snap.rect);
-                // The cursor remains free; each step is measured from its original
-                // position, never from the last snapped client geometry.
-                if(!geometryMatches(windowRect(w),snap.rect,0)&&!dryRun)w.frameGeometry=snap.rect;
+                handlers.resizePreview();
+                queryFreeModifier(value=>{if(drag&&!drag.moving){drag.free=value;handlers.resizePreview();}},false);
                 return;
             }
             queryFreeModifier(value=>{if(drag&&drag.moving){drag.free=value;handlers.preview();}},false);
@@ -942,7 +982,7 @@ Item {
                 if(!geometryMatches(windowRect(w),d.rect)) {
                     const point={x:Workspace.cursorPos.x,y:Workspace.cursorPos.y};
                     queryFreeModifier(value=>{
-                        if(enabled&&!paused&&displaysReady()&&d.epoch===displayEpoch&&windowConnections.has(w)&&tileable(w))drop(w,point,false,value);
+                        if(enabled&&!paused&&displaysReady()&&d.epoch===displayEpoch&&windowConnections.has(w)&&tileable(w))drop(w,point,false,d.free||value);
                         resizePreviewWindows.clear();interactiveWindows.delete(w);apply();
                     },true);return;
                 }
@@ -950,7 +990,9 @@ Item {
                 // Wayland can report Finished before the client's Escape restore
                 // frame arrives. Keep the guard and provisional neighbors until
                 // that final configure has had a chance to commit.
-                pendingResizeEnds.set(w,d);resizeFinishTimer.restart();return;
+                queryFreeModifier(value=>{
+                    d.free=d.free||value;pendingResizeEnds.set(w,d);resizeFinishTimer.restart();
+                },true);return;
             }
             resizePreviewWindows.clear();interactiveWindows.delete(w);apply();
         };
@@ -1057,6 +1099,14 @@ Item {
         snapshotRestored.arguments=[JSON.stringify({gap,missing:entries.filter(e=>!e.window).length})];snapshotRestored.call();
     }
 
+    function adoptionTree(items,bounds,fuzz) {
+        if(!items.length)return leaf();
+        if(items.some((item,i)=>item.rect.x<bounds.x-fuzz||item.rect.y<bounds.y-fuzz||rectRight(item.rect)>rectRight(bounds)+fuzz||rectBottom(item.rect)>rectBottom(bounds)+fuzz||items.slice(0,i).some(other=>intersects(item.rect,other.rect,-fuzz))))return null;
+        const tree=layoutAround(items,bounds,0,fuzz);if(!tree)return null;
+        const map=new Map();compute(tree,bounds,map);
+        if(items.some(item=>{const s=leaves(tree).find(s=>s.windows.includes(item.slot.windows[0]));return !s||!geometryMatches(map.get(s),item.rect,fuzz);}))return null;
+        return tree;
+    }
     function adoptExistingGeometry() {
         // A runtime upgrade must not retile an already valid desktop. Rebuild
         // from actual frames, including user adjustments made while stopped.
@@ -1071,12 +1121,26 @@ Item {
                 const s=leaf();s.windows=[w];items.push({slot:s,rect:windowRect(w)});
             }
             if(!items.length)continue;
-            if(items.some((item,i)=>item.rect.x<bounds.x-fuzz||item.rect.y<bounds.y-fuzz||rectRight(item.rect)>rectRight(bounds)+fuzz||rectBottom(item.rect)>rectBottom(bounds)+fuzz||items.slice(0,i).some(other=>intersects(item.rect,other.rect,-fuzz))))continue;
-            const tree=layoutAround(items,bounds,0,fuzz);if(!tree)continue;
-            const map=new Map();compute(tree,bounds,map);
-            if(items.some(item=>{const s=leaves(tree).find(s=>s.windows.includes(item.slot.windows[0]));return !geometryMatches(map.get(s),item.rect,fuzz);}))continue;
+            let adopted=items,tree=adoptionTree(adopted,bounds,fuzz);
+            // A deliberately floating/overlapping app must not make one runtime
+            // restart retile every other window. If removing exactly one client
+            // recovers the native partition, preserve it outside the tree.
+            if(!tree)for(let i=0;i<items.length;i++) {
+                const trial=items.filter((_item,index)=>index!==i),candidate=adoptionTree(trial,bounds,fuzz);
+                if(candidate){adopted=trial;tree=candidate;break;}
+            }
+            if(!tree) {
+                // An arrangement that cannot be represented is still the user's
+                // arrangement. Leave every existing client untouched and let
+                // future windows enter a fresh layout instead of replaying the
+                // stale startup tree.
+                for(const w of windows)floating.add(w);
+                m.root=leaf();continue;
+            }
+            const retained=new Set(adopted.map(item=>item.slot.windows[0]));
+            for(const item of items)if(!retained.has(item.slot.windows[0]))floating.add(item.slot.windows[0]);
             const vacant=leaves(tree).filter(s=>!s.windows.length);
-            for(const w of windows.filter(w=>!visibleHere(w)))assign(vacant.shift()||leaves(tree)[0],w);
+            for(const w of windows.filter(w=>!visibleHere(w)&&!floating.has(w)))assign(vacant.shift()||leaves(tree)[0],w);
             m.root=tree;m.adopted=true;
         }
     }
@@ -1125,6 +1189,7 @@ Item {
     // KWin's scripting API has no work-area-changed signal. Panel visibility,
     // position and size can change without screensChanged being emitted.
     Timer { id: workAreaTimer; interval: 500; running: true; repeat: true; onTriggered: root.workAreasChanged() }
+    Timer { id: enrollmentTimer; interval: 750; running: true; repeat: true; onTriggered: root.enrollWindows() }
 
     DBusCall { id: unloadCall }
     DBusCall { id: freeModifierCall;service:"org.kde.KWin";path:"/Effects";dbusInterface:"org.kde.kwin.Effects";method:"isEffectLoaded";onFinished:(returnValue)=>root.modifierQueryFinished(returnValue[0]);onFailed:root.modifierQueryFinished(false) }

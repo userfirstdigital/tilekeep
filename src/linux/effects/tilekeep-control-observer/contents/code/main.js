@@ -7,11 +7,11 @@ let marked = effects.isEffectLoaded(marker);
 
 function updateControl(_position, _oldPosition, _buttons, _oldButtons, modifiers) {
     const control = (Number(modifiers) & controlModifier) !== 0;
-    // Do no work for ordinary Ctrl shortcuts. Once a drag has activated the
+    // Do no work for ordinary Ctrl shortcuts. Once a move or resize has activated the
     // marker, retain it until Ctrl is released so the drop callback can query
-    // the exact release gesture after KWin clears `window.move`.
-    const moving = effects.stackingOrder.some(window => window.move);
-    const next = control && (marked || moving);
+    // the exact release gesture after KWin clears its interactive state.
+    const interactive = effects.stackingOrder.some(window => window.move || window.resize);
+    const next = control && (marked || interactive);
     if (next === marked) {
         return;
     }

@@ -520,6 +520,14 @@ test('new windows use minimized vacancies without displacing visible neighbors',
     assert.equal(c.slotOf(newWindow)[1],vacancy);assert.equal(existing.windows.length,1);
     assert.deepEqual({...c.rects(m).get(existing)},{...before});assert.equal(hidden.minimized,true);
 });
+test('a window that becomes eligible after windowAdded is enrolled without touching explicit floating windows',()=>{
+    const c=backend(),late=window(c),m=c.monitors[0];c.detach(late);late.normalWindow=false;c.Workspace.stackingOrder=[late];
+    assert.equal(c.appeared(late),false);assert.equal(c.slotOf(late),null);
+    late.normalWindow=true;c.enrollWindows();assert.ok(c.slotOf(late));
+    const floated=window(c);c.monitors.pop();c.detach(floated);c.floating.add(floated);c.Workspace.stackingOrder.push(floated);
+    c.enrollWindows();assert.equal(c.slotOf(floated),null);assert.equal(c.floating.has(floated),true);
+    assert.equal(c.allWindows(m.root).includes(late),true);
+});
 test('unstack separates overlapping windows into visible free space',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true};
     c.splitSlot(m,m.root,'x',false,hidden);
@@ -646,6 +654,57 @@ test('connected windows below and across the shared edge follow in both directio
         assert.deepEqual({...next.get(c.slotOf(below)[1])},{...bottom,width:bottom.width+delta});
         assert.deepEqual({...next.get(c.slotOf(neighbor)[1])},{...across,x:across.x+delta,width:across.width-delta});
     }
+});
+test('Ctrl resize leaves same-side windows fixed while the crossed window yields',()=>{
+    for(const delta of [-100,100]) {
+        const c=backend(),w=window(c),m=c.monitors[0],below={},neighbor={};c.gap=1;
+        const before={x:1,y:1,width:499,height:250},bottom={x:1,y:252,width:499,height:547};
+        const across={x:501,y:1,width:498,height:798};
+        arrange(c,m,[[w,before],[below,bottom],[neighbor,across]]);
+        const after={...before,width:before.width+delta};
+        assert.equal(c.adjustRatio(w,before,after,true),true);
+        const next=c.rects(m);
+        assert.deepEqual({...next.get(c.slotOf(w)[1])},after);
+        assert.deepEqual({...next.get(c.slotOf(below)[1])},bottom,'same-side aligned window stays put');
+        assert.deepEqual({...next.get(c.slotOf(neighbor)[1])},delta>0?{...across,x:across.x+delta,width:across.width-delta}:across,
+            'the opposite window yields only when the edge is pushed into it');
+    }
+});
+test('Ctrl resize crosses a vacant strip before shrinking the window it reaches',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],neighbor={};c.gap=1;
+    const before={x:1,y:1,width:299,height:798},across={x:501,y:1,width:498,height:798};
+    arrange(c,m,[[w,before],[neighbor,across]]);
+    const after={...before,width:599};
+    assert.equal(c.adjustRatio(w,before,after,true),true);
+    const next=c.rects(m);
+    assert.deepEqual({...next.get(c.slotOf(w)[1])},after);
+    assert.deepEqual({...next.get(c.slotOf(neighbor)[1])},{x:601,y:1,width:398,height:798});
+});
+test('interactive Ctrl resize previews and commits only the yielding opposite window',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],below=window(c),neighbor=window(c);c.monitors.splice(1);c.gap=1;
+    const before={x:1,y:1,width:499,height:250},bottom={x:1,y:252,width:499,height:547},across={x:501,y:1,width:498,height:798};
+    arrange(c,m,[[w,before],[below,bottom],[neighbor,across]]);
+    w.frameGeometry=before;below.frameGeometry=bottom;neighbor.frameGeometry=across;w.move=false;
+    let control=true;c.freeModifierCall.call=()=>c.modifierQueryFinished(control);
+    c.Workspace.cursorPos={x:500,y:100};w.interactiveMoveResizeStarted.emit();
+    c.Workspace.cursorPos={x:600,y:100};w.interactiveMoveResizeStepped.emit({...before,width:599});
+    assert.deepEqual({...below.frameGeometry},bottom,'same-side preview remains fixed');
+    assert.deepEqual({...neighbor.frameGeometry},{x:601,y:1,width:398,height:798},'opposite preview yields');
+    control=false;w.interactiveMoveResizeFinished.emit();c.completeResizeEnds();
+    const next=c.rects(m);
+    assert.deepEqual({...next.get(c.slotOf(below)[1])},bottom);
+    assert.deepEqual({...next.get(c.slotOf(neighbor)[1])},{x:601,y:1,width:398,height:798});
+});
+test('a Ctrl move stays free when Ctrl is released just after the mouse button',()=>{
+    const c=backend(),w=window(c),m=c.monitors[0],neighbor=window(c);c.monitors.pop();c.gap=1;
+    arrange(c,m,[[w,{x:1,y:1,width:249,height:798}],[neighbor,{x:251,y:1,width:748,height:798}]]);
+    w.frameGeometry={x:1,y:1,width:249,height:798};neighbor.frameGeometry={x:251,y:1,width:748,height:798};w.move=true;
+    let control=true;c.freeModifierCall.call=()=>c.modifierQueryFinished(control);
+    c.Workspace.cursorPos={x:100,y:100};w.interactiveMoveResizeStarted.emit();
+    c.Workspace.cursorPos={x:900,y:400};w.frameGeometry={x:800,y:1,width:249,height:798};w.interactiveMoveResizeStepped.emit(w.frameGeometry);
+    const before=c.area(c.rects(m).get(c.slotOf(neighbor)[1]));
+    control=false;w.interactiveMoveResizeFinished.emit();
+    assert.ok(c.area(c.rects(m).get(c.slotOf(neighbor)[1]))<before,'occupied destination still yields after the release race');
 });
 test('shrinking a monitor-filling window creates reusable space without a parent split',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],before=c.rects(m).get(m.root);
@@ -871,6 +930,36 @@ test('restart adoption tolerates the subpixel seams produced by 125% scaling',()
     assert.equal(placements.every(p=>p.tolerance===3),true,'the first reconciliation retains fractional native frames');
     c.apply();
     assert.equal(m.adopted,false,'the relaxed startup tolerance is one-shot');
+});
+test('restart preserves a tiled partition and leaves one overlapping window floating',()=>{
+    const c=backend(),a=window(c),m=c.monitors[0];c.gap=1;
+    const b={frameGeometry:{x:501,y:1,width:498,height:798},desktops:[1],activities:[]};
+    const overlay={frameGeometry:{x:400,y:200,width:300,height:300},desktops:[1],activities:[]};
+    a.frameGeometry={x:1,y:1,width:499,height:798};
+    const left=c.slotOf(a)[1],right=c.leaf(),floatingSlot=c.leaf();c.assign(right,b);c.assign(floatingSlot,overlay);
+    m.root={kind:'split',axis:'x',ratio:.5,preserveSpace:false,parent:null,first:left,second:{kind:'split',axis:'y',ratio:.5,preserveSpace:false,parent:null,first:right,second:floatingSlot}};
+    left.parent=m.root;m.root.second.parent=m.root;right.parent=m.root.second;floatingSlot.parent=m.root.second;
+    c.adoptExistingGeometry();
+    assert.equal(c.floating.has(overlay),true);
+    assert.equal(c.slotOf(overlay),null);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(a)[1])},{...a.frameGeometry});
+    assert.deepEqual({...c.rects(m).get(c.slotOf(b)[1])},{...b.frameGeometry});
+});
+test('restart leaves an unrepresentable desktop untouched instead of replaying a stale tree',()=>{
+    const c=backend(),a=window(c),m=c.monitors[0];c.gap=1;
+    const b={frameGeometry:{x:350,y:50,width:400,height:500},desktops:[1],activities:[]};
+    const d={frameGeometry:{x:200,y:300,width:500,height:400},desktops:[1],activities:[]};
+    a.frameGeometry={x:50,y:50,width:400,height:500};
+    const as=c.slotOf(a)[1],bs=c.leaf(),ds=c.leaf();c.assign(bs,b);c.assign(ds,d);
+    m.root={kind:'split',axis:'x',ratio:.5,preserveSpace:false,parent:null,first:as,second:{kind:'split',axis:'y',ratio:.5,preserveSpace:false,parent:null,first:bs,second:ds}};
+    as.parent=m.root;m.root.second.parent=m.root;bs.parent=m.root.second;ds.parent=m.root.second;
+    c.adoptExistingGeometry();
+    assert.equal(c.leaves(m.root).length,1);
+    assert.equal(c.allWindows(m.root).length,0);
+    assert.equal(c.floating.has(a)&&c.floating.has(b)&&c.floating.has(d),true);
+    assert.deepEqual({...a.frameGeometry},{x:50,y:50,width:400,height:500});
+    assert.deepEqual({...b.frameGeometry},{x:350,y:50,width:400,height:500});
+    assert.deepEqual({...d.frameGeometry},{x:200,y:300,width:500,height:400});
 });
 test('snapshot round trip keeps deliberately small resized vacancies exact',()=>{
     const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;

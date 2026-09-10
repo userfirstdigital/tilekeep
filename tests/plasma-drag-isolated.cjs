@@ -22,7 +22,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
     const send=async line=>{input.stdin.write(line+'\n');if(await reply()!=='OK')throw Error('Input acknowledgement missing');await wait(100);};
     const controlDrag=process.argv.includes('--control-drag');
     const effectLoaded=name=>dbus('/Effects','org.kde.kwin.Effects.isEffectLoaded',name)==='true';
-    let loaded=false;
+    let loaded=false,probeLoaded=false;
     try {
         if(await reply()!=='READY')throw Error('Input not ready');
         if(controlDrag) {
@@ -32,6 +32,30 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
             await send('key 29 0');
             if(effectLoaded('tilekeep-control-marker'))throw Error('Ctrl release did not unload the marker effect');
             console.log('PASS ordinary Ctrl stays inert outside a window drag');
+
+            // Exercise KWin's real interactive-resize state before loading the
+            // Tilekeep script. This catches observer regressions independently
+            // of the mocked handler tests below.
+            const probe=path.join(rootDir,'resize-marker-probe.qml');
+            fs.writeFileSync(probe,`import QtQuick\nimport org.kde.kwin 3.0\nItem { Component.onCompleted: { const w=Workspace.stackingOrder.find(w=>String(w.caption)==='Tilekeep isolated A'); if(!w) console.log('TKRESIZEPROBE FAIL'); else { Workspace.activeWindow=w; console.log('TKRESIZEPROBE READY'); } } }\n`);
+            loadScript(dbus,probe,'tilekeep-resize-marker-probe');probeLoaded=true;
+            let probeReady=false;
+            for(let i=0;i<50;i++) {
+                await wait(50);
+                const log=fs.readFileSync(logFile,'utf8');
+                if(log.includes('TKRESIZEPROBE FAIL'))throw Error('Could not activate private resize probe window');
+                if(log.includes('TKRESIZEPROBE READY')){probeReady=true;break;}
+            }
+            if(!probeReady)throw Error('Private resize probe timed out');
+            execFileSync('qdbus6',['org.kde.kglobalaccel','/component/kwin','org.kde.kglobalaccel.Component.invokeShortcut','Window Resize'],{stdio:['ignore',fd,fd]});
+            await wait(150);
+            await send('key 29 1');
+            if(!effectLoaded('tilekeep-control-marker'))throw Error('Ctrl resize did not load the marker effect');
+            await send('key 29 0');
+            if(effectLoaded('tilekeep-control-marker'))throw Error('Ctrl resize marker survived Ctrl release');
+            await send('key 1 1');await send('key 1 0');
+            console.log('PASS Ctrl is observed during a real private KWin edge resize');
+            dbus('/Scripting','org.kde.kwin.Scripting.unloadScript','tilekeep-resize-marker-probe');probeLoaded=false;
         }
         let source=baseline?execFileSync('git',['show','v0.2.6:src/linux/kwin.qml'],{cwd:path.join(__dirname,'..'),encoding:'utf8'}):fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8');
         source=source.replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
@@ -55,6 +79,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      root.testA=Workspace.stackingOrder.find(w=>String(w.caption)==='Tilekeep isolated A');
      root.testB=Workspace.stackingOrder.find(w=>String(w.caption)==='Tilekeep isolated B');
      root.dragCheck(root.testA&&root.testB,'owned windows missing');
+     root.floating.delete(root.testA);root.floating.delete(root.testB);
      const a=root.leaf(),b=root.leaf(),empty=root.leaf();root.assign(a,root.testA);root.assign(b,root.testB);
      if(root.dragCase===28) {
        m.root={kind:'split',axis:'x',ratio:.25,first:a,second:b,parent:null};a.parent=m.root;b.parent=m.root;
@@ -134,6 +159,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
     } finally {
         if(input.exitCode===null){input.stdin.end('button 0\nquit\n');await wait(150);if(input.exitCode===null)input.kill('SIGTERM');}
         if(loaded)dbus('/Scripting','org.kde.kwin.Scripting.unloadScript','tilekeep-native-drag-test');
+        if(probeLoaded)dbus('/Scripting','org.kde.kwin.Scripting.unloadScript','tilekeep-resize-marker-probe');
     }
 };
 module.exports.prepare=prepare;

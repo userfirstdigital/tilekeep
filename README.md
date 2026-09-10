@@ -77,13 +77,18 @@ On **Plasma Wayland**, resizing follows the connected shared edge. Aligned windo
 below/above a vertical edge (or beside a horizontal edge) stay aligned, and windows across it
 grow or shrink as you drag. Unrelated windows retain their rectangles: an empty stretch breaks
 the connection, and matching coordinates or an old ancestor split alone do not link windows.
+Hold **Ctrl while resizing** to leave same-side aligned windows in place. Only a window the moving
+edge actually reaches yields space; shrinking the edge leaves reusable empty space.
 Shrinking an unshared edge creates reusable empty space, including for a monitor-filling window.
 Faint alignment guides and a **6-logical-pixel** snap range help match quarter/half/three-quarter
 positions in the work area or available space, other window edges, and equal widths/heights.
 Drag more than 6 pixels past a target to override it; Escape cancels the gesture. Snaps respect
 application minimum sizes and panel work areas. When a collision or layout constraint prevents
 further growth, the edge stops at the last valid local position rather than moving distant windows.
-An already valid non-overlapping desktop layout is retained when the Plasma runtime restarts.
+An already valid desktop layout is retained when the Plasma runtime restarts. A single overlapping
+app is kept floating while the surrounding partition is adopted; if the arrangement cannot be
+represented safely, all existing windows stay exactly where they are. Apps whose normal-window
+metadata arrives late are enrolled within 750 ms instead of being missed at startup.
 See [connected-edge verification](docs/verification-0.2.5.md) for behavior and test coverage.
 
 Windows and X11 currently retain the original shared-divider resize behavior; these new local
@@ -98,7 +103,7 @@ cargo run --release -- [--gap 1] [--dry-run] [--list]
 On Linux, both Plasma 6 Wayland and EWMH-compatible X11 desktops are supported. Plasma Wayland
 uses a temporary KWin script because only the compositor is allowed to manage native Wayland
 windows; the script is loaded when `wm` starts and unloaded when it quits. A small user-local
-KWin effect reports Ctrl only during an active window move, without raw input-device access;
+KWin effect reports Ctrl only during an active window move or resize, without raw input-device access;
 it is also loaded and unloaded with Tilekeep. `qdbus6` (normally installed with Plasma) is
 required. X11 uses the standard EWMH and RandR protocols directly.
 Only one Plasma integration instance runs at a time. Starting a second does not disturb the first.
@@ -209,7 +214,10 @@ This verifies corner quarters, edge halves, full-space centers, release geometry
 including the dragged window's original slot. See [requirements and regression evidence](docs/verification-0.2.7.md).
 Add `--control-drag` to load the modifier effect in the private OpenGL compositor and inject real
 Ctrl press/release events. That mode also verifies source-hole collapse, occupied-destination
-yielding, modifier cleanup, and the Free preview without touching the login desktop.
+yielding, modifier cleanup, Ctrl edge resizing, and the Free preview without touching the login
+desktop. During an edge resize, Ctrl leaves windows aligned with the resized window's side in
+place; only a window the moving edge actually reaches yields space. Normal resizing continues
+to keep connected shared edges aligned.
 
 With Tilekeep running on Plasma, `python tests/tray-live.py --allow-settings-changes` exercises
 real tray callbacks for pause, gap, login startup, and snapshot save/load/startup selection.
