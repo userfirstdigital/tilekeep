@@ -82,7 +82,8 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      root.floating.delete(root.testA);root.floating.delete(root.testB);
      const a=root.leaf(),b=root.leaf(),empty=root.leaf();root.assign(a,root.testA);root.assign(b,root.testB);
      if(root.dragCase===28) {
-       m.root={kind:'split',axis:'x',ratio:.25,first:a,second:b,parent:null};a.parent=m.root;b.parent=m.root;
+       m.root=b;b.parent=null;root.floating.add(root.testA);
+       root.placeWindow(root.testA,{x:80,y:80,width:300,height:300});
      } else {
        const rows={kind:'split',axis:'y',ratio:.5,first:a,second:b,parent:null};a.parent=rows;b.parent=rows;
        m.root={kind:'split',axis:'x',ratio:.5,first:rows,second:empty,parent:null};rows.parent=m.root;empty.parent=m.root;
@@ -96,30 +97,33 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      const x=root.dragCase===27?.5:root.dragCase===28?.95:root.dragCase>=19?[.2,.8][(root.dragCase-19)%2]:[.1,.5,.9][index%3];
      const y=root.dragCase>=27?.5:root.dragCase>=19?[.2,.8][Math.floor((root.dragCase-19)%4/2)]:[.1,.5,.9][Math.floor(index/3)];
      const p={x:r.x+r.width*x,y:r.y+r.height*y};
-     if(root.dragCase>=27) {
-       const plan=root.freeDropPreview(root.testA,p);root.dragCheck(!!plan,'free preview plan missing');
+     if(root.dragCase===28) {
+       const plan=root.floatingDropPreview(root.testA,p);root.dragCheck(!!plan,'floating dock preview plan missing');
        root.wantedZone=plan.zone;root.wantedRect=plan.rect;
-     } else {root.wantedZone=root.dragCase>=19?'center':root.fittingEmptyZone(root.testA,r,root.emptyZone(r,p));root.wantedRect=root.emptyPart(r,root.wantedZone);}
+     } else if(root.dragCase===27){root.wantedZone='floating';root.wantedRect=null;}
+     else {root.wantedZone=root.dragCase>=19?'center':root.fittingEmptyZone(root.testA,r,root.emptyZone(r,p));root.wantedRect=root.emptyPart(r,root.wantedZone);}
      console.log('TKDRAG READY',JSON.stringify({case:root.dragCase,start:{x:root.sourceRect.x+root.sourceRect.width*.4,y:root.sourceRect.y+12},point:p}));root.dragPhase=2;root.dragTicks=0;return;
    }
    if(root.dragPhase===2){
-     if(!root.testA.move||!dragPreview.visible||root.dragTicks<8)return;
+     if(!root.testA.move||root.dragTicks<8)return;
+     if(root.dragCase!==27&&!dragPreview.visible)return;
+     if(root.dragCase===27){root.dragCheck(!dragPreview.visible,'tiled-to-floating drag showed a tile target');console.log('TKDRAG HOVER',root.dragCase,root.wantedZone);root.dragPhase=3;root.dragTicks=0;return;}
      if(root.dragCase===0)dragPreview.contentItem.grabToImage(result=>result.saveToFile('${rootDir}/hover.png'));
      if(root.dragCase===19)dragPreview.contentItem.grabToImage(result=>result.saveToFile('${rootDir}/hover-full.png'));
      root.dragCheck(root.previewZone===root.wantedZone,'hover zone mismatch '+JSON.stringify({expected:root.wantedZone,actual:root.previewZone}));
      root.dragCheck(root.geometryMatches(root.previewGeometry,root.wantedRect,1),'hover extent mismatch');
      if(root.dragCase<27)root.dragCheck(root.geometryMatches(root.previewArea,root.targetRect,1),'full-space guides missing');
-     else root.dragCheck(root.previewFree,'Ctrl drag was not shown as free');
+     else root.dragCheck(!root.previewFree,'floating dock preview used the old free-move label');
      root.dragCheck(Workspace.activeWindow===root.testA,'preview stole focus');
      console.log('TKDRAG HOVER',root.dragCase,root.wantedZone);root.dragPhase=3;root.dragTicks=0;return;
    }
    if(root.dragPhase===3){
      if(root.testA.move||root.interactiveWindows.size||root.dragTicks<8)return;
      const expected=root.dragCase===18?root.sourceRect:root.wantedRect;
-     root.dragCheck(root.geometryMatches(root.windowRect(root.testA),expected,2),'release mismatch '+JSON.stringify({case:root.dragCase,expected,actual:root.windowRect(root.testA)}));
+     if(root.dragCase!==27)root.dragCheck(root.geometryMatches(root.windowRect(root.testA),expected,2),'release mismatch '+JSON.stringify({case:root.dragCase,expected,actual:root.windowRect(root.testA)}));
      if(root.dragCase<27)root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'unrelated window moved');
-     if(root.dragCase===27)root.dragCheck(root.area(root.windowRect(root.testB))>root.area(root.fixedRect),'source neighbor did not fill the collapsed hole');
-     if(root.dragCase===28)root.dragCheck(root.area(root.windowRect(root.testB))<root.area(root.fixedRect),'occupied destination did not yield space');
+     if(root.dragCase===27){root.dragCheck(root.floating.has(root.testA)&&!root.slotOf(root.testA),'tiled window did not become floating');root.dragCheck(root.area(root.windowRect(root.testB))>root.area(root.fixedRect),'source neighbor did not fill the collapsed hole');}
+     if(root.dragCase===28){root.dragCheck(!root.floating.has(root.testA)&&!!root.slotOf(root.testA),'floating window did not become tiled');root.dragCheck(root.area(root.windowRect(root.testB))<root.area(root.fixedRect),'occupied destination did not yield space');}
      root.dragCheck(!dragPreview.visible,'preview survived release');
      console.log('TKDRAG PASS',root.dragCase);root.dragCase++;root.dragTicks=0;
      if(root.dragCase===${controlDrag?29:27}){console.log('TKDRAG DONE');this.stop();}else root.dragPhase=0;
@@ -151,7 +155,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
                     if(controlDrag&&/HOVER (27|28) /.test(line))await send('key 29 0');
                     if(controlDrag&&/HOVER (27|28) /.test(line)&&effectLoaded('tilekeep-control-marker'))throw Error('Ctrl drag marker survived Ctrl release');
                 } else if(line.includes('TKDRAG DONE')) {
-                    console.log(controlDrag?'PASS 28 native drag/hover/drop targets plus Escape; Ctrl free source and occupied destination verified':'PASS 26 native drag/hover/drop targets plus Escape; expanded full-space target verified');return;
+                    console.log(controlDrag?'PASS 29 native drag/hover/drop targets plus Escape; Ctrl tile-to-float and float-to-tile transitions verified':'PASS 27 native drag/hover/drop targets plus Escape; expanded full-space target verified');return;
                 }
             }
         }

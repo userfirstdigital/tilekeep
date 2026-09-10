@@ -86,6 +86,57 @@ Item {
         }
         return true;
     }
+    function collapseVisibleVacatedSlot(monitor,slot) {
+        if(slot===monitor.root||!vacantHere(slot))return false;
+        const map=rects(monitor);
+        // Grow to the whole visually vacant branch around the source. Filling
+        // this region avoids retaining a minimized window or an old placeholder
+        // as a visible hole.
+        let empty=slot;
+        while(empty!==monitor.root) {
+            const parent=empty.parent;if(!parent)break;
+            const sibling=parent.first===empty?parent.second:parent.first;
+            if(!vacantSubtree(sibling))break;
+            empty=parent;
+        }
+        if(empty===monitor.root||!empty.parent)return false;
+        const parent=empty.parent,region=map.get(empty),removed=new Set(leaves(empty));
+        const items=leaves(monitor.root).filter(s=>!removed.has(s)).map(s=>({slot:s,rect:Object.assign({},map.get(s))}));
+        const visible=items.filter(item=>!vacantHere(item.slot));
+        function option(side) {
+            const horizontal=side==="left"||side==="right",start=horizontal?region.y:region.x,end=horizontal?rectBottom(region):rectRight(region);
+            const candidates=visible.filter(item=>{
+                const r=item.rect,low=horizontal?r.y:r.x,high=horizontal?rectBottom(r):rectRight(r);
+                const adjacent=side==="right"?Math.abs(r.x-rectRight(region)-gap)<=2:
+                    side==="left"?Math.abs(rectRight(r)+gap-region.x)<=2:
+                    side==="bottom"?Math.abs(r.y-rectBottom(region)-gap)<=2:Math.abs(rectBottom(r)+gap-region.y)<=2;
+                return adjacent&&low>=start-2&&high<=end+2;
+            }).sort((a,b)=>(horizontal?a.rect.y-b.rect.y:a.rect.x-b.rect.x));
+            let covered=start;
+            for(const item of candidates) {
+                const low=horizontal?item.rect.y:item.rect.x,high=horizontal?rectBottom(item.rect):rectRight(item.rect);
+                if(low>covered+gap+2)return null;covered=Math.max(covered,high);
+            }
+            return candidates.length&&covered>=end-2?{side,candidates}:null;
+        }
+        const preferred=parent.axis==="x"?(parent.first===empty?"right":"left"):(parent.first===empty?"bottom":"top");
+        const choices=[preferred,"right","bottom","left","top"].filter((v,i,a)=>a.indexOf(v)===i);
+        let chosen=null;for(const side of choices){chosen=option(side);if(chosen)break;}
+        if(!chosen)return false;
+        for(const item of chosen.candidates) {
+            const r=item.rect;
+            if(chosen.side==="right"){r.width=rectRight(r)-region.x;r.x=region.x;}
+            else if(chosen.side==="left")r.width=rectRight(region)-r.x;
+            else if(chosen.side==="bottom"){r.height=rectBottom(r)-region.y;r.y=region.y;}
+            else r.height=rectBottom(region)-r.y;
+        }
+        const tree=layoutAround(items,inset(monitor.area),0);if(!tree)return false;
+        const marker=chosen.candidates[0].slot.windows.find(w=>visibleHere(w));
+        monitor.root=tree;
+        const home=marker&&slotOf(marker);if(!home)return false;
+        for(const old of removed)for(const hidden of old.windows)home[1].windows.push(hidden);
+        return true;
+    }
     function splitSlot(monitor, target, axis, newFirst, w) {
         const added = leaf(); added.windows = [w];
         const available=rects(monitor).get(target), a=minimumSize(target), b=minimumSize(added);
@@ -572,6 +623,17 @@ Item {
             return {rect:rects(found[0]).get(found[1]),area:empty?hit[2]:null,zone:z};
         }finally {for(let i=0;i<monitors.length;i++)monitors[i].root=roots[i];sequence=oldSequence;}
     }
+    function floatingDropPreview(w,p) {
+        if(!floating.has(w))return null;
+        floating.delete(w);
+        try{return freeDropPreview(w,p);}finally{floating.add(w);}
+    }
+    function floatWindow(w) {
+        const source=slotOf(w);if(!source)return false;
+        detach(w);
+        collapseVisibleVacatedSlot(source[0],source[1]);
+        floating.add(w);return true;
+    }
     function drop(w,p,stack,free) {
         if(floating.has(w))return false;
         let hit=slotAt(p); if(!hit)return false;
@@ -875,8 +937,8 @@ Item {
         const next=(visible.indexOf(focused)+delta+visible.length)%visible.length;
         focused=visible[next];s.active=s.windows.indexOf(focused);apply();Workspace.raiseWindow(focused);Workspace.activeWindow=focused;
     }
-    function showPreview(w,r,full,z,free) {
-        if(!enabled||paused||dryRun||!tileable(w)||floating.has(w))return;
+    function showPreview(w,r,full,z,free,allowFloating) {
+        if(!enabled||paused||dryRun||!tileable(w)||(floating.has(w)&&!allowFloating))return;
         previewOwner=w;
         previewArea=full||null;previewZone=z||"center";previewFree=!!free;
         const surface=full||r;
@@ -918,8 +980,9 @@ Item {
             interactiveWindows.add(w);
             placementDeadline.stop();placementSpacing.stop();
             placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
-            if(!paused&&!displayTransition&&tileable(w)&&!floating.has(w)) {
-                drag={epoch:displayEpoch,rect:windowRect(w),moving:w.move,cursor:Workspace.cursorPos?{x:Workspace.cursorPos.x,y:Workspace.cursorPos.y}:null,edges:[],raw:null,free:false};
+            const wasFloating=floating.has(w);
+            if(!paused&&!displayTransition&&tileable(w)&&(!wasFloating||w.move)) {
+                drag={epoch:displayEpoch,rect:windowRect(w),moving:w.move,wasFloating,cursor:Workspace.cursorPos?{x:Workspace.cursorPos.x,y:Workspace.cursorPos.y}:null,edges:[],raw:null,free:false};
                 queryFreeModifier(value=>{if(drag)drag.free=value;},false);
             }
         };
@@ -961,10 +1024,12 @@ Item {
         };
         handlers.preview=()=>{
             if(!drag||!drag.moving||paused||!displaysReady()||drag.epoch!==displayEpoch)return;
-            if(drag.free) {
-                const plan=freeDropPreview(w,Workspace.cursorPos);if(!plan){hidePreview(w);return;}
-                showPreview(w,plan.rect,plan.area,plan.zone,true);return;
+            if(drag.wasFloating) {
+                if(!drag.free){hidePreview(w);return;}
+                const plan=floatingDropPreview(w,Workspace.cursorPos);if(!plan){hidePreview(w);return;}
+                showPreview(w,plan.rect,plan.area,plan.zone,false,true);return;
             }
+            if(drag.free){hidePreview(w);return;}
             const hit=slotAt(Workspace.cursorPos);if(!hit){hidePreview(w);return;}
             const empty=vacantForDrop(hit[1],w);
             const z=empty?fittingEmptyZone(w,hit[2],emptyZone(hit[2],Workspace.cursorPos)):zone(hit[2],Workspace.cursorPos);
@@ -982,7 +1047,13 @@ Item {
                 if(!geometryMatches(windowRect(w),d.rect)) {
                     const point={x:Workspace.cursorPos.x,y:Workspace.cursorPos.y};
                     queryFreeModifier(value=>{
-                        if(enabled&&!paused&&displaysReady()&&d.epoch===displayEpoch&&windowConnections.has(w)&&tileable(w))drop(w,point,false,d.free||value);
+                        if(enabled&&!paused&&displaysReady()&&d.epoch===displayEpoch&&windowConnections.has(w)&&tileable(w)) {
+                            const control=d.free||value;
+                            if(d.wasFloating) {
+                                if(control){floating.delete(w);if(!drop(w,point,false,false))floating.add(w);}
+                            } else if(control)floatWindow(w);
+                            else drop(w,point,false,false);
+                        }
                         resizePreviewWindows.clear();interactiveWindows.delete(w);apply();
                     },true);return;
                 }

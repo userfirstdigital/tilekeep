@@ -65,13 +65,13 @@ LEFT│ ←    CENTER   → │RIGHT      Center → swap
 Closing a window leaves its slot **empty**; the next window you open takes the most recently
 emptied slot, so nothing else moves. `Super+Shift+K` compacts when *you* decide.
 
-Hold **Ctrl while moving a window** for a free move. Tilekeep closes only the source hole made
-by that window, so its immediate source-side neighbor can reclaim the released space; unrelated
-vacancies remain untouched. The destination behavior stays spatial: empty destinations still
-offer full/half/quarter placement, and an occupied destination yields space to the dragged
-window instead of swapping. The preview is labeled **Free** and shows the final compacted result.
-Release Ctrl before the mouse button to return to an ordinary move. Use `Super+Shift+G` to create
-a stack explicitly; stacking is no longer overloaded onto Ctrl-drag.
+On **Plasma Wayland**, hold **Ctrl while moving a tiled window by its title bar** to pull it out
+of the layout. A directly connected neighbor fills its source hole without rescaling unrelated
+windows, and the window stays floating where you release it. Hold
+Ctrl while moving that floating window again to see the regular tile shadows; drop it on a full,
+half, quarter, or occupied target to make it tiled again. Moving a floating window without Ctrl
+simply moves it, and Escape cancels either transition. `Super+Shift+F` remains the keyboard toggle
+for floating, while `Super+Shift+G` creates a stack explicitly.
 
 On **Plasma Wayland**, resizing follows the connected shared edge. Aligned windows immediately
 below/above a vertical edge (or beside a horizontal edge) stay aligned, and windows across it
@@ -139,8 +139,8 @@ journalctl -f _COMM=kwin_wayland | grep Tilekeep
 | `Super+Shift+N` / `Super+Shift+B` | Next / previous window in the focused stack |
 | `Super+Shift+Q` | Quit |
 
-A floating window is left alone: wm neither previews nor re-tiles its drags; press `Super+Shift+F`
-again to put it back.
+A floating window is otherwise left alone. On Plasma Wayland, Ctrl-title-bar-drag it onto a shaded
+target to tile it; `Super+Shift+F` remains the direct keyboard toggle on every platform.
 
 A chord another program owns is logged at start and skipped.
 
@@ -213,11 +213,11 @@ For real pointer-driven hover/drop checks in that private session, run
 This verifies corner quarters, edge halves, full-space centers, release geometry, and Escape,
 including the dragged window's original slot. See [requirements and regression evidence](docs/verification-0.2.7.md).
 Add `--control-drag` to load the modifier effect in the private OpenGL compositor and inject real
-Ctrl press/release events. That mode also verifies source-hole collapse, occupied-destination
-yielding, modifier cleanup, Ctrl edge resizing, and the Free preview without touching the login
-desktop. During an edge resize, Ctrl leaves windows aligned with the resized window's side in
-place; only a window the moving edge actually reaches yields space. Normal resizing continues
-to keep connected shared edges aligned.
+Ctrl press/release events. That mode also verifies tile-to-floating and floating-to-tile title-bar
+drags, source-hole collapse, occupied-destination yielding, modifier cleanup, and Ctrl edge resizing
+without touching the login desktop. During an edge resize, Ctrl leaves windows aligned with the
+resized window's side in place; only a window the moving edge actually reaches yields space.
+Normal resizing continues to keep connected shared edges aligned.
 
 With Tilekeep running on Plasma, `python tests/tray-live.py --allow-settings-changes` exercises
 real tray callbacks for pause, gap, login startup, and snapshot save/load/startup selection.

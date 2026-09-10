@@ -36,7 +36,7 @@ pub fn run(options: Options) -> Result<(), String> {
         && match load_modifier_effect() {
             Ok(()) => true,
             Err(e) => {
-                log::warn!("Ctrl-drag free placement is unavailable: {e}");
+                log::warn!("Ctrl move/resize gestures are unavailable: {e}");
                 false
             }
         };
@@ -219,7 +219,7 @@ fn load_modifier_effect() -> Result<(), String> {
     };
     if result.is_err() {
         // A failed D-Bus reply does not prove KWin did not finish loading it.
-        // Always restore an inert state before continuing without Ctrl-drag.
+        // Always restore an inert state before continuing without Ctrl gestures.
         unload_modifier_effect();
     }
     result
