@@ -66,8 +66,9 @@ Closing a window leaves its slot **empty**; the next window you open takes the m
 emptied slot, so nothing else moves. `Super+Shift+K` compacts when *you* decide.
 
 On **Plasma Wayland**, hold **Ctrl while moving a tiled window by its title bar** to pull it out
-of the layout. A directly connected neighbor fills its source hole without rescaling unrelated
-windows, and the window stays floating where you release it. Hold
+of the layout. Its tile stays empty, every surrounding window keeps its exact size and position,
+and the window stays floating where you release it. You can resize the surrounding windows into
+that space manually when you want. Hold
 Ctrl while moving that floating window again to see the regular tile shadows; drop it on a full,
 half, quarter, or occupied target to make it tiled again. Moving a floating window without Ctrl
 simply moves it, and Escape cancels either transition. `Super+Shift+F` remains the keyboard toggle
@@ -214,7 +215,7 @@ This verifies corner quarters, edge halves, full-space centers, release geometry
 including the dragged window's original slot. See [requirements and regression evidence](docs/verification-0.2.7.md).
 Add `--control-drag` to load the modifier effect in the private OpenGL compositor and inject real
 Ctrl press/release events. That mode also verifies tile-to-floating and floating-to-tile title-bar
-drags, source-hole collapse, occupied-destination yielding, modifier cleanup, and Ctrl edge resizing
+drags, source-vacancy retention, occupied-destination yielding, modifier cleanup, and Ctrl edge resizing
 without touching the login desktop. During an edge resize, Ctrl leaves windows aligned with the
 resized window's side in place; only a window the moving edge actually reaches yields space.
 Normal resizing continues to keep connected shared edges aligned.

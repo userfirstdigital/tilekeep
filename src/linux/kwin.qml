@@ -86,57 +86,6 @@ Item {
         }
         return true;
     }
-    function collapseVisibleVacatedSlot(monitor,slot) {
-        if(slot===monitor.root||!vacantHere(slot))return false;
-        const map=rects(monitor);
-        // Grow to the whole visually vacant branch around the source. Filling
-        // this region avoids retaining a minimized window or an old placeholder
-        // as a visible hole.
-        let empty=slot;
-        while(empty!==monitor.root) {
-            const parent=empty.parent;if(!parent)break;
-            const sibling=parent.first===empty?parent.second:parent.first;
-            if(!vacantSubtree(sibling))break;
-            empty=parent;
-        }
-        if(empty===monitor.root||!empty.parent)return false;
-        const parent=empty.parent,region=map.get(empty),removed=new Set(leaves(empty));
-        const items=leaves(monitor.root).filter(s=>!removed.has(s)).map(s=>({slot:s,rect:Object.assign({},map.get(s))}));
-        const visible=items.filter(item=>!vacantHere(item.slot));
-        function option(side) {
-            const horizontal=side==="left"||side==="right",start=horizontal?region.y:region.x,end=horizontal?rectBottom(region):rectRight(region);
-            const candidates=visible.filter(item=>{
-                const r=item.rect,low=horizontal?r.y:r.x,high=horizontal?rectBottom(r):rectRight(r);
-                const adjacent=side==="right"?Math.abs(r.x-rectRight(region)-gap)<=2:
-                    side==="left"?Math.abs(rectRight(r)+gap-region.x)<=2:
-                    side==="bottom"?Math.abs(r.y-rectBottom(region)-gap)<=2:Math.abs(rectBottom(r)+gap-region.y)<=2;
-                return adjacent&&low>=start-2&&high<=end+2;
-            }).sort((a,b)=>(horizontal?a.rect.y-b.rect.y:a.rect.x-b.rect.x));
-            let covered=start;
-            for(const item of candidates) {
-                const low=horizontal?item.rect.y:item.rect.x,high=horizontal?rectBottom(item.rect):rectRight(item.rect);
-                if(low>covered+gap+2)return null;covered=Math.max(covered,high);
-            }
-            return candidates.length&&covered>=end-2?{side,candidates}:null;
-        }
-        const preferred=parent.axis==="x"?(parent.first===empty?"right":"left"):(parent.first===empty?"bottom":"top");
-        const choices=[preferred,"right","bottom","left","top"].filter((v,i,a)=>a.indexOf(v)===i);
-        let chosen=null;for(const side of choices){chosen=option(side);if(chosen)break;}
-        if(!chosen)return false;
-        for(const item of chosen.candidates) {
-            const r=item.rect;
-            if(chosen.side==="right"){r.width=rectRight(r)-region.x;r.x=region.x;}
-            else if(chosen.side==="left")r.width=rectRight(region)-r.x;
-            else if(chosen.side==="bottom"){r.height=rectBottom(r)-region.y;r.y=region.y;}
-            else r.height=rectBottom(region)-r.y;
-        }
-        const tree=layoutAround(items,inset(monitor.area),0);if(!tree)return false;
-        const marker=chosen.candidates[0].slot.windows.find(w=>visibleHere(w));
-        monitor.root=tree;
-        const home=marker&&slotOf(marker);if(!home)return false;
-        for(const old of removed)for(const hidden of old.windows)home[1].windows.push(hidden);
-        return true;
-    }
     function splitSlot(monitor, target, axis, newFirst, w) {
         const added = leaf(); added.windows = [w];
         const available=rects(monitor).get(target), a=minimumSize(target), b=minimumSize(added);
@@ -629,9 +578,8 @@ Item {
         try{return freeDropPreview(w,p);}finally{floating.add(w);}
     }
     function floatWindow(w) {
-        const source=slotOf(w);if(!source)return false;
+        if(!slotOf(w))return false;
         detach(w);
-        collapseVisibleVacatedSlot(source[0],source[1]);
         floating.add(w);return true;
     }
     function drop(w,p,stack,free) {

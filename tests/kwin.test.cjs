@@ -695,9 +695,10 @@ test('interactive Ctrl resize previews and commits only the yielding opposite wi
     assert.deepEqual({...next.get(c.slotOf(below)[1])},bottom);
     assert.deepEqual({...next.get(c.slotOf(neighbor)[1])},{x:601,y:1,width:398,height:798});
 });
-test('Ctrl title-bar drag pulls a tiled window into floating mode and closes its source hole',()=>{
+test('Ctrl title-bar drag pulls a tiled window into floating mode without changing its neighbors',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],neighbor=window(c);c.monitors.pop();c.gap=1;
     arrange(c,m,[[w,{x:1,y:1,width:249,height:798}],[neighbor,{x:251,y:1,width:748,height:798}]]);
+    const source=c.slotOf(w)[1],tree=m.root,before={...c.rects(m).get(c.slotOf(neighbor)[1])};
     w.frameGeometry={x:1,y:1,width:249,height:798};neighbor.frameGeometry={x:251,y:1,width:748,height:798};w.move=true;
     let control=true;c.freeModifierCall.call=()=>c.modifierQueryFinished(control);
     c.Workspace.cursorPos={x:100,y:100};w.interactiveMoveResizeStarted.emit();
@@ -706,34 +707,22 @@ test('Ctrl title-bar drag pulls a tiled window into floating mode and closes its
     control=false;w.interactiveMoveResizeFinished.emit();
     assert.equal(c.floating.has(w),true);assert.equal(c.slotOf(w),null);
     assert.deepEqual({...w.frameGeometry},{x:600,y:100,width:249,height:798},'floating window keeps its native drop rectangle');
-    assert.deepEqual({...c.rects(m).get(c.slotOf(neighbor)[1])},{x:1,y:1,width:998,height:798},'neighbor fills the released tile hole');
+    assert.equal(m.root,tree);assert.equal(source.windows.length,0);
+    assert.deepEqual({...c.rects(m).get(source)},{x:1,y:1,width:249,height:798},'released tile remains empty');
+    assert.deepEqual({...c.rects(m).get(c.slotOf(neighbor)[1])},before,'neighbor keeps its exact rectangle');
 });
-test('pulling out the last visible tile closes its hole without losing minimized stack members',()=>{
+test('pulling out preserves minimized stack members and the complete surrounding layout',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true},neighbor=window(c);c.monitors.pop();c.gap=1;
     arrange(c,m,[[w,{x:1,y:1,width:249,height:798}],[neighbor,{x:251,y:1,width:748,height:798}]]);
-    c.assign(c.slotOf(w)[1],hidden);
+    const source=c.slotOf(w)[1],tree=m.root,before=new Map(c.leaves(tree).map(s=>[s,{...c.rects(m).get(s)}]));c.assign(source,hidden);
     w.frameGeometry={x:1,y:1,width:249,height:798};neighbor.frameGeometry={x:251,y:1,width:748,height:798};w.move=true;
     c.freeModifierCall.call=()=>c.modifierQueryFinished(true);
     c.Workspace.cursorPos={x:100,y:100};w.interactiveMoveResizeStarted.emit();
     c.Workspace.cursorPos={x:700,y:400};w.frameGeometry={x:600,y:100,width:249,height:798};w.interactiveMoveResizeStepped.emit(w.frameGeometry);
     w.interactiveMoveResizeFinished.emit();
     assert.equal(c.floating.has(w),true);assert.equal(c.slotOf(w),null);
-    assert.equal(c.slotOf(hidden)[1],c.slotOf(neighbor)[1],'minimized member remains tracked with the connected neighbor');
-    assert.equal(hidden.minimized,true);
-    assert.deepEqual({...c.rects(m).get(c.slotOf(neighbor)[1])},{x:1,y:1,width:998,height:798});
-});
-test('pulling out collapses a nested visually empty branch before expanding its visible neighbor',()=>{
-    const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true},otherHidden={minimized:true},neighbor=window(c);c.monitors.pop();c.gap=1;
-    const source=c.leaf(),placeholder=c.leaf(),bottom=c.leaf();c.assign(source,w);c.assign(source,hidden);c.assign(placeholder,otherHidden);c.assign(bottom,neighbor);
-    const vacant={kind:'split',axis:'x',ratio:.5,first:source,second:placeholder,parent:null};source.parent=vacant;placeholder.parent=vacant;
-    m.root={kind:'split',axis:'y',ratio:.5,first:vacant,second:bottom,parent:null};vacant.parent=m.root;bottom.parent=m.root;
-    const before=c.rects(m);w.frameGeometry={...before.get(source)};neighbor.frameGeometry={...before.get(bottom)};w.move=true;
-    c.freeModifierCall.call=()=>c.modifierQueryFinished(true);
-    c.Workspace.cursorPos={x:100,y:100};w.interactiveMoveResizeStarted.emit();
-    c.Workspace.cursorPos={x:700,y:400};w.frameGeometry={x:600,y:100,width:w.frameGeometry.width,height:w.frameGeometry.height};w.interactiveMoveResizeStepped.emit(w.frameGeometry);
-    w.interactiveMoveResizeFinished.emit();
-    const filled=c.slotOf(neighbor)[1];assert.equal(m.root,filled);assert.equal(c.slotOf(hidden)[1],filled);assert.equal(c.slotOf(otherHidden)[1],filled);
-    assert.deepEqual({...c.rects(m).get(filled)},{x:1,y:1,width:998,height:798});
+    assert.equal(m.root,tree);assert.equal(c.slotOf(hidden)[1],source);assert.equal(hidden.minimized,true);
+    for(const [slot,r] of before)assert.deepEqual({...c.rects(m).get(slot)},r);
 });
 test('Ctrl title-bar drag docks a floating window into the shaded tile target',()=>{
     const c=backend(),tiled=window(c),m=c.monitors[0],w=window(c);c.monitors.pop();c.gap=1;

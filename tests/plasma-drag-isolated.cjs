@@ -122,7 +122,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      const expected=root.dragCase===18?root.sourceRect:root.wantedRect;
      if(root.dragCase!==27)root.dragCheck(root.geometryMatches(root.windowRect(root.testA),expected,2),'release mismatch '+JSON.stringify({case:root.dragCase,expected,actual:root.windowRect(root.testA)}));
      if(root.dragCase<27)root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'unrelated window moved');
-     if(root.dragCase===27){root.dragCheck(root.floating.has(root.testA)&&!root.slotOf(root.testA),'tiled window did not become floating');root.dragCheck(root.area(root.windowRect(root.testB))>root.area(root.fixedRect),'source neighbor did not fill the collapsed hole');}
+     if(root.dragCase===27){root.dragCheck(root.floating.has(root.testA)&&!root.slotOf(root.testA),'tiled window did not become floating');root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'source neighbor moved during pull-out');root.dragCheck(root.leaves(m.root).some(s=>root.vacantHere(s)&&root.geometryMatches(root.rects(m).get(s),root.sourceRect,1)),'source tile did not remain vacant');}
      if(root.dragCase===28){root.dragCheck(!root.floating.has(root.testA)&&!!root.slotOf(root.testA),'floating window did not become tiled');root.dragCheck(root.area(root.windowRect(root.testB))<root.area(root.fixedRect),'occupied destination did not yield space');}
      root.dragCheck(!dragPreview.visible,'preview survived release');
      console.log('TKDRAG PASS',root.dragCase);root.dragCase++;root.dragTicks=0;
