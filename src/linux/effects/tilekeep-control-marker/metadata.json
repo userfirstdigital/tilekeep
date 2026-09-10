@@ -1,0 +1,13 @@
+{
+    "KPackageStructure": "KWin/Effect",
+    "KPlugin": {
+        "Category": "Window Management",
+        "Description": "Internal Ctrl-drag state marker for Tilekeep",
+        "EnabledByDefault": false,
+        "Hidden": true,
+        "Id": "tilekeep-control-marker",
+        "License": "Apache-2.0",
+        "Name": "Tilekeep Ctrl-drag marker"
+    },
+    "X-Plasma-API": "javascript"
+}

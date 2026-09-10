@@ -323,8 +323,9 @@ impl Desktop {
         slots.into_iter().min_by_key(|s| distance_sq(rects[s], p)).map(|s| (m.id, s))
     }
 
-    /// Apply a drop of `dragged` at cursor position `at`. `stack` is the Ctrl modifier.
-    pub fn drop_window(&mut self, dragged: WindowId, at: Point, stack: bool) -> DropEffect {
+    /// Apply a drop of `dragged` at cursor position `at`. In free mode the
+    /// vacated source slot collapses, but the destination still yields space.
+    pub fn drop_window(&mut self, dragged: WindowId, at: Point, free: bool) -> DropEffect {
         // Floating means LEFT ALONE: a floating window's drags do nothing at all, so it stays
         // wherever the user puts it. Refused first, before the slot is even looked up, so that
         // `preview_rect` (which routes through here) yields None and no preview is drawn either.
@@ -332,11 +333,24 @@ impl Desktop {
         if self.floating.contains(&dragged) {
             return DropEffect::Ignored;
         }
+        let Some((initial_target_mon, initial_target)) = self.slot_at(at) else { return DropEffect::Ignored };
+        let initial_tmi = self.monitor_index(initial_target_mon).expect("slot_at only returns known monitors");
+        let mut source = self.locate(dragged);
+
+        if free && source != Some((initial_tmi, initial_target)) {
+            if let Some((smi, src)) = source {
+                self.detach(dragged);
+                self.monitors[smi].tree.collapse_empty_slot(src);
+                source = None;
+            }
+        }
+
+        // Collapsing the source can enlarge the destination. Resolve it again
+        // so the preview and final split use the geometry now under the cursor.
         let Some((target_mon, target)) = self.slot_at(at) else { return DropEffect::Ignored };
         let tmi = self.monitor_index(target_mon).expect("slot_at only returns known monitors");
         let target_rect = self.rects_for(tmi)[&target];
         let zone = drop_zone(target_rect, at);
-        let source = self.locate(dragged);
 
         if source == Some((tmi, target)) {
             // Dropped on its own slot: only meaningful when tearing a window out of a stack.
@@ -361,11 +375,6 @@ impl Desktop {
         }
 
         match zone {
-            DropZone::Center if stack => {
-                self.detach(dragged);
-                self.monitors[tmi].tree.assign(target, dragged);
-                DropEffect::Stacked
-            }
             DropZone::Center => match source {
                 Some((smi, src)) => {
                     self.swap(smi, src, tmi, target);
@@ -387,10 +396,26 @@ impl Desktop {
         }
     }
 
+    /// Explicit stacking remains available as a shortcut, independently of
+    /// Ctrl-drag's free-move behavior.
+    pub fn stack_window(&mut self, dragged: WindowId, at: Point) -> DropEffect {
+        if self.floating.contains(&dragged) {
+            return DropEffect::Ignored;
+        }
+        let Some((target_mon, target)) = self.slot_at(at) else { return DropEffect::Ignored };
+        let tmi = self.monitor_index(target_mon).expect("slot_at only returns known monitors");
+        if self.locate(dragged) == Some((tmi, target)) {
+            return DropEffect::Ignored;
+        }
+        self.detach(dragged);
+        self.monitors[tmi].tree.assign(target, dragged);
+        DropEffect::Stacked
+    }
+
     /// Where `dragged` would land if dropped now; `None` when the drop would do nothing.
-    pub fn preview_rect(&self, dragged: WindowId, at: Point, stack: bool) -> Option<Rect> {
+    pub fn preview_rect(&self, dragged: WindowId, at: Point, free: bool) -> Option<Rect> {
         let mut sim = self.clone();
-        if sim.drop_window(dragged, at, stack) == DropEffect::Ignored {
+        if sim.drop_window(dragged, at, free) == DropEffect::Ignored {
             return None;
         }
         sim.rect_of(dragged)
@@ -676,14 +701,14 @@ mod tests {
     /// Z-order on every apply), and within a stack the raised member is LAST so an applier
     /// that raises in order leaves it on top.
     ///
-    /// The stack is built by a Ctrl drop, then focus is moved to B — the member that was
+    /// The stack is built by the explicit stack action, then focus is moved to B — the member that was
     /// there FIRST — so the active one is not the last-assigned. Sabotage: delete the
     /// `sort_by_key` line in `placements` and the "raised member last" assertion fails,
     /// because `slot_windows` yields B then A in assignment order.
     #[test]
     fn placements_list_stack_members_with_the_active_one_last() {
         let mut d = two_up(); // A (0,0,500,500) | B (500,0,500,500)
-        assert_eq!(d.drop_window(A, Point { x: 750, y: 250 }, true), DropEffect::Stacked);
+        assert_eq!(d.stack_window(A, Point { x: 750, y: 250 }), DropEffect::Stacked);
         d.window_appeared(C, M1, None); // fills A's vacated slot: a single-occupant slot to compare against
         d.focus_changed(B);
         let stack_rect = Rect::new(500, 0, 500, 500);
@@ -712,7 +737,7 @@ mod tests {
         let mut d = two_up();
         assert!(!d.is_stacked(A), "alone in its slot");
         assert!(!d.is_stacked(C), "untracked");
-        assert_eq!(d.drop_window(A, Point { x: 750, y: 250 }, true), DropEffect::Stacked);
+        assert_eq!(d.stack_window(A, Point { x: 750, y: 250 }), DropEffect::Stacked);
         assert!(d.is_stacked(A));
         assert!(d.is_stacked(B), "both members of the stack");
         d.window_vanished(A);
@@ -820,6 +845,31 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_free_drop_collapses_only_its_source_and_still_splits_the_destination() {
+        let mut normal = two_up();
+        assert_eq!(normal.drop_window(A, Point { x: 950, y: 250 }, false), DropEffect::Split);
+        assert_eq!(normal.monitors()[0].tree.slots().len(), 3, "ordinary drag remembers the source vacancy");
+        assert_eq!(rect(&normal, A), Rect::new(750, 0, 250, 500));
+
+        let mut free = two_up();
+        let preview = free.preview_rect(A, Point { x: 950, y: 250 }, true).unwrap();
+        assert_eq!(free.drop_window(A, Point { x: 950, y: 250 }, true), DropEffect::Split);
+        assert_eq!(free.monitors()[0].tree.slots().len(), 2, "only the vacated source was collapsed");
+        assert_eq!(rect(&free, B), Rect::new(0, 0, 500, 500), "the destination yielded half its enlarged space");
+        assert_eq!(rect(&free, A), Rect::new(500, 0, 500, 500));
+        assert_eq!(preview, rect(&free, A));
+    }
+
+    #[test]
+    fn ctrl_free_drop_into_empty_space_uses_the_space_after_source_collapse() {
+        let mut d = two_up();
+        d.window_vanished(B);
+        assert_eq!(d.drop_window(A, Point { x: 750, y: 250 }, true), DropEffect::Moved);
+        assert_eq!(d.monitors()[0].tree.slots().len(), 1);
+        assert_eq!(rect(&d, A), M1_AREA, "the surviving destination takes the released source space");
+    }
+
+    #[test]
     fn center_drop_on_an_empty_slot_fills_it() {
         let mut d = two_up();
         d.window_vanished(B);
@@ -850,7 +900,7 @@ mod tests {
     #[test]
     fn unstack_uses_a_vacancy_and_keeps_both_windows() {
         let mut d = two_up();
-        d.drop_window(B, Point { x: 250, y: 250 }, true);
+        d.stack_window(B, Point { x: 250, y: 250 });
         assert!(d.is_stacked(A));
         assert!(d.unstack(B));
         assert!(!d.is_stacked(A));
@@ -882,9 +932,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_centre_drop_stacks_and_stack_members_share_the_rect() {
+    fn explicit_stack_action_stacks_and_stack_members_share_the_rect() {
         let mut d = two_up();
-        assert_eq!(d.drop_window(A, Point { x: 750, y: 250 }, true), DropEffect::Stacked);
+        assert_eq!(d.stack_window(A, Point { x: 750, y: 250 }), DropEffect::Stacked);
         assert_eq!(rect(&d, A), Rect::new(500, 0, 500, 500));
         assert_eq!(rect(&d, B), Rect::new(500, 0, 500, 500));
         let p = d.placements();
@@ -919,7 +969,7 @@ mod tests {
     #[test]
     fn centre_drop_of_a_stacked_window_on_its_own_slot_is_ignored() {
         let mut d = two_up();
-        assert_eq!(d.drop_window(A, Point { x: 750, y: 250 }, true), DropEffect::Stacked);
+        assert_eq!(d.stack_window(A, Point { x: 750, y: 250 }), DropEffect::Stacked);
         let before = d.clone();
         assert_eq!(d.drop_window(A, Point { x: 750, y: 250 }, false), DropEffect::Ignored);
         assert_eq!(d, before);
@@ -935,25 +985,10 @@ mod tests {
         assert_eq!(preview, rect(&real, C));
         assert_eq!(d.preview_rect(A, Point { x: 5000, y: 5 }, false), None);
         assert_eq!(d.preview_rect(A, Point { x: 250, y: 250 }, false), None, "no-op drop has no preview");
-        // Stacking is the one preview branch nothing else exercises: with `stack` the drop
-        // joins the target's slot instead of splitting it, so the preview is B's whole rect.
-        let stacked = d.preview_rect(A, Point { x: 750, y: 250 }, true).unwrap();
-        assert_eq!(stacked, Rect::new(500, 0, 500, 500), "stack preview is the target's whole rect");
-        // That assertion alone cannot fail on the flag: a TRACKED window dropped on an occupied
-        // centre swaps, and a swap puts it on the target's rect too, so it reads the same with
-        // `stack = false`. Dropping an UNTRACKED window is where the two answers diverge -- stack
-        // assigns it to the target's slot, no-stack tiles it beside -- so this pair, not the line
-        // above, is what goes red if `stack` stops being honoured.
-        assert_eq!(
-            d.preview_rect(C, Point { x: 750, y: 250 }, true).unwrap(),
-            Rect::new(500, 0, 500, 500),
-            "stacked: the untracked window joins B's slot"
-        );
-        assert_eq!(
-            d.preview_rect(C, Point { x: 750, y: 250 }, false).unwrap(),
-            Rect::new(750, 0, 250, 500),
-            "not stacked: the same drop splits B along its longest axis instead"
-        );
+        let free = d.preview_rect(A, Point { x: 750, y: 250 }, true).unwrap();
+        let mut real_free = d.clone();
+        real_free.drop_window(A, Point { x: 750, y: 250 }, true);
+        assert_eq!(free, rect(&real_free, A), "free preview matches its compacting drop");
     }
 
     #[test]
@@ -1099,7 +1134,7 @@ mod tests {
     #[test]
     fn cycle_stack_rotates_the_focused_slot() {
         let mut d = two_up();
-        d.drop_window(A, Point { x: 750, y: 250 }, true); // A stacked on B, A active
+        d.stack_window(A, Point { x: 750, y: 250 }); // A stacked on B, A active
         d.focus_changed(A);
         assert_eq!(d.cycle_stack(1), Some(B));
         assert_eq!(d.focused(), Some(B));

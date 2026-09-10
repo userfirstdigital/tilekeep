@@ -453,6 +453,17 @@ impl App {
                 log::info!("{} is now {}", window::describe(fg), if floating { "floating" } else { "tiled" });
                 self.apply();
             }
+            Hotkey::StackAtCursor => {
+                if !fg.0.is_null() {
+                    if let Some(at) = cursor_pos() {
+                        let effect = self.desktop.stack_window(fg_id, at);
+                        log::info!("stack {} at {:?} -> {:?}", window::describe(fg), at, effect);
+                        if effect != DropEffect::Ignored {
+                            self.apply();
+                        }
+                    }
+                }
+            }
             Hotkey::StackNext | Hotkey::StackPrev => {
                 let delta = if hk == Hotkey::StackNext { 1 } else { -1 };
                 if let Some(w) = self.desktop.cycle_stack(delta) {

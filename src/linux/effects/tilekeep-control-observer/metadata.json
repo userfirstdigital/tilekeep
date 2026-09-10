@@ -1,0 +1,13 @@
+{
+    "KPackageStructure": "KWin/Effect",
+    "KPlugin": {
+        "Category": "Window Management",
+        "Description": "Reports Ctrl-drag state to Tilekeep without capturing keyboard input",
+        "EnabledByDefault": false,
+        "Hidden": true,
+        "Id": "tilekeep-control-observer",
+        "License": "Apache-2.0",
+        "Name": "Tilekeep Ctrl-drag observer"
+    },
+    "X-Plasma-API": "javascript"
+}

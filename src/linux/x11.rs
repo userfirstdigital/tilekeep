@@ -26,16 +26,18 @@ enum Hotkey {
     Compact,
     Retile,
     ToggleFloat,
+    StackAtCursor,
     StackNext,
     StackPrev,
     Quit,
 }
 
 impl Hotkey {
-    const ALL: [(Hotkey, u32); 6] = [
+    const ALL: [(Hotkey, u32); 7] = [
         (Hotkey::Compact, b'K' as u32),
         (Hotkey::Retile, b'L' as u32),
         (Hotkey::ToggleFloat, b'F' as u32),
+        (Hotkey::StackAtCursor, b'G' as u32),
         (Hotkey::StackNext, b'N' as u32),
         (Hotkey::StackPrev, b'B' as u32),
         (Hotkey::Quit, b'Q' as u32),
@@ -46,6 +48,7 @@ impl Hotkey {
             Hotkey::Compact => "Super+Shift+K  compact the monitor under the cursor",
             Hotkey::Retile => "Super+Shift+L  re-read monitors and re-apply layout",
             Hotkey::ToggleFloat => "Super+Shift+F  toggle floating for the active window",
+            Hotkey::StackAtCursor => "Super+Shift+G  stack the active window at the cursor",
             Hotkey::StackNext => "Super+Shift+N  next window in the focused stack",
             Hotkey::StackPrev => "Super+Shift+B  previous window in the focused stack",
             Hotkey::Quit => "Super+Shift+Q  quit",
@@ -557,6 +560,15 @@ impl App {
                             self.x.describe(X11::window(id)),
                             if floating { "floating" } else { "tiled" }
                         );
+                        self.apply();
+                    }
+                }
+            }
+            Hotkey::StackAtCursor => {
+                if let (Some(id), Some((point, _, _))) = (active, self.x.pointer()) {
+                    let effect = self.desktop.stack_window(id, point);
+                    log::info!("stack {} at {:?} -> {:?}", self.x.describe(X11::window(id)), point, effect);
+                    if effect != DropEffect::Ignored {
                         self.apply();
                     }
                 }

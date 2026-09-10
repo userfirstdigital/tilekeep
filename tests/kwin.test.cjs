@@ -15,7 +15,9 @@ function backend() {
         monitors:[], focused:null, floating:new Set(), identities:new Map(), expectedGeometry:new Map(),
         deferredPlacements:new Map(), interactiveWindows:new Set(), placementQueue:[], currentPlacement:null,
         placementAttempt:0, windowConnections:new Map(), sequence:1,pendingSnapshot:null,
-        previewOwner:null,previewGeometry:null,dragPreview:{visible:false},resizeGuide:{visible:false},resizeGuides:[],resizePreviewWindows:new Map(),pendingResizeEnds:new Map(),
+        previewOwner:null,previewGeometry:null,previewArea:null,previewZone:'center',previewFree:false,
+        modifierQueryPending:false,modifierListener:null,modifierAfterPending:null,
+        dragPreview:{visible:false},resizeGuide:{visible:false},resizeGuides:[],resizePreviewWindows:new Map(),pendingResizeEnds:new Map(),
         displayTransition:false,displayEpoch:0,displayFingerprint:'',displayStableTicks:0,displaySamples:[],pendingWindows:new Set(),deferredSnapshot:null,saveAfterDisplay:false,
         placementDeadline:timer(), placementSpacing:timer(), recoveryTimer:timer(),workAreaTimer:timer(),resizeFinishTimer:timer(),
         KWin:{MaximizeArea:0},
@@ -29,6 +31,7 @@ function backend() {
         return {set target(v){if(v===null)disconnect();},destroy:disconnect};
     }};
     context.Workspace.clientArea=(_option,output)=>context.monitors.find(m=>m.output===output).area;
+    context.freeModifierCall={arguments:[],call(){context.modifierQueryFinished(false);}};
     vm.runInContext(functions,context);
     return context;
 }
@@ -381,6 +384,36 @@ test('a center drop fills a genuinely empty slot without splitting it',()=>{
     const target=c.slotOf(other)[1],r=c.rects(m).get(target);c.detach(other);
     assert.equal(c.drop(w,{x:r.x+r.width/2,y:r.y+r.height/2},false),true);
     assert.equal(c.slotOf(w)[1],target);assert.equal(c.leaves(m.root).length,2);
+});
+test('Ctrl free drop collapses the source but keeps empty-space placement and preview exact',()=>{
+    const c=backend(),a=window(c),m=c.monitors[0],b={},empty=c.leaf();
+    const as=c.slotOf(a)[1];c.assign(as,b);c.detach(b);
+    const lower=c.leaf();c.assign(lower,b);
+    const rows={kind:'split',axis:'y',ratio:.5,first:as,second:lower,parent:null};as.parent=rows;lower.parent=rows;
+    m.root={kind:'split',axis:'x',ratio:.5,first:rows,second:empty,parent:null};rows.parent=m.root;empty.parent=m.root;
+    const beforeB=c.rects(m).get(lower),target=c.rects(m).get(empty),p={x:target.x+target.width/2,y:target.y+target.height/2};
+    const plan=c.freeDropPreview(a,p);assert.ok(plan);assert.equal(plan.zone,'center');
+    assert.equal(c.drop(a,p,false,true),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(a)[1])},{...plan.rect});
+    assert.ok(c.area(c.rects(m).get(c.slotOf(b)[1]))>c.area(beforeB),'the source neighbor fills the released hole');
+    assert.equal(c.leaves(m.root).length,2);
+});
+test('Ctrl free drop on a window shrinks that destination instead of swapping or stacking',()=>{
+    const c=backend(),a=window(c),m=c.monitors[0],b={};
+    c.splitSlot(m,m.root,'x',false,b);m.root.ratio=.25;
+    const beforeB=c.rects(m).get(c.slotOf(b)[1]),p={x:beforeB.x+beforeB.width*.95,y:beforeB.y+beforeB.height/2};
+    const plan=c.freeDropPreview(a,p);assert.ok(plan);assert.equal(plan.zone,'right');
+    assert.equal(c.drop(a,p,false,true),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(a)[1])},{...plan.rect});
+    assert.ok(c.area(c.rects(m).get(c.slotOf(b)[1]))<c.area(beforeB),'destination yields room for the dragged window');
+    assert.equal(c.leaves(m.root).length,2);assert.notEqual(c.slotOf(a)[1],c.slotOf(b)[1]);
+});
+test('free placement does not collapse a source still occupied by a hidden stack member',()=>{
+    const c=backend(),a=window(c),m=c.monitors[0],hidden={minimized:true},b={};
+    c.assign(c.slotOf(a)[1],hidden);c.splitSlot(m,c.slotOf(a)[1],'x',false,b);
+    const source=c.slotOf(a)[1],target=c.slotOf(b)[1],p={x:c.rects(m).get(target).x+2,y:400};
+    assert.equal(c.drop(a,p,false,true),true);
+    assert.equal(c.slotOf(hidden)[1],source);assert.equal(c.leaves(m.root).length,3);
 });
 test('all nine empty-space drop zones match their final placement',()=>{
     for(const x of [.1,.5,.9])for(const y of [.1,.5,.9]) {

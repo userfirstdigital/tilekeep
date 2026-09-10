@@ -8,6 +8,12 @@ const rootDir=process.env.TILEKEEP_ISOLATED_DIR;
 if(!process.argv.includes('--inside')) {
     const dir=fs.mkdtempSync(path.join(os.tmpdir(),'tilekeep-isolated-'));
     for(const sub of ['runtime','config','cache','data'])fs.mkdirSync(path.join(dir,sub),{mode:0o700});
+    if(process.argv.includes('--control-drag'))for(const name of ['tilekeep-control-observer','tilekeep-control-marker']) {
+        const source=path.join(__dirname,'../src/linux/effects',name),target=path.join(dir,'data/kwin/effects',name);
+        fs.mkdirSync(path.join(target,'contents/code'),{recursive:true});
+        fs.copyFileSync(path.join(source,'metadata.json'),path.join(target,'metadata.json'));
+        fs.copyFileSync(path.join(source,'contents/code/main.js'),path.join(target,'contents/code/main.js'));
+    }
     const env={...process.env,TILEKEEP_ISOLATED_DIR:dir,XDG_RUNTIME_DIR:path.join(dir,'runtime'),XDG_CONFIG_HOME:path.join(dir,'config'),XDG_CACHE_HOME:path.join(dir,'cache'),XDG_DATA_HOME:path.join(dir,'data'),QT_QUICK_BACKEND:'software',QT_FORCE_STDERR_LOGGING:'1',QT_QPA_PLATFORMTHEME:'generic',LIBGL_ALWAYS_SOFTWARE:'1',WAYLAND_DISPLAY:'tilekeep-isolated'};
     for(const name of ['DBUS_SESSION_BUS_ADDRESS','DISPLAY','XAUTHORITY','SESSION_MANAGER','WAYLAND_SOCKET','JOURNAL_STREAM','APPIMAGE','APPDIR'])delete env[name];
     const runnerLog=fs.openSync(path.join(dir,'runner.log'),'wx',0o600);
@@ -18,17 +24,23 @@ if(!process.argv.includes('--inside')) {
     const logFile=path.join(rootDir,'kwin.log'),fd=fs.openSync(logFile,'wx',0o600);
     // Qt caches directory entries when resolving local QML component names.
     for(let i=0;i<40;i++)fs.writeFileSync(path.join(rootDir,'TKISOLATED'+i+'.qml'),'');
+    const modifierTest=process.argv.includes('--control-drag');
     const env={...process.env,QT_QPA_PLATFORM:'offscreen'};
     const mesa='/usr/share/glvnd/egl_vendor.d/50_mesa.json';if(fs.existsSync(mesa))env.__EGL_VENDOR_LIBRARY_FILENAMES=mesa;
+    if(modifierTest){delete env.__EGL_VENDOR_LIBRARY_FILENAMES;env.KWIN_COMPOSE='O2';}
     if(process.argv.includes('--native-drag'))require('./plasma-drag-isolated.cjs').prepare(rootDir,fd);
     const scale=process.argv.includes('--fractional-scale')?'1.25':'1';
     const kwin=spawn('kwin_wayland',['--virtual','--width','1200','--height','800','--scale',scale,'--no-lockscreen','--no-kactivities','--socket','tilekeep-isolated'],{env,stdio:['ignore',fd,fd]});
     const dbus=(...a)=>execFileSync('qdbus6',['org.kde.KWin',...a],{encoding:'utf8',timeout:3000,stdio:['ignore','pipe','pipe']}).trim();
-    let app;
+    let app,modifierLoaded=false;
     try {
         let ready=false;
         for(let i=0;i<100;i++){if(kwin.exitCode!==null)throw Error('Private KWin exited during startup');try{dbus('/Scripting','org.kde.kwin.Scripting.isScriptLoaded','tilekeep-runtime');ready=true;break;}catch{}await wait(100);}
         if(!ready)throw Error('Private KWin did not start');
+        if(modifierTest) {
+            modifierLoaded=dbus('/Effects','org.kde.kwin.Effects.loadEffect','tilekeep-control-observer')==='true';
+            if(!modifierLoaded)throw Error('Private KWin could not load the Ctrl observer effect; supported='+dbus('/Effects','org.kde.kwin.Effects.isEffectSupported','tilekeep-control-observer')+' listed='+dbus('/Effects','org.freedesktop.DBus.Properties.Get','org.kde.kwin.Effects','listOfEffects'));
+        }
         if(process.argv.includes('--fractional-scale')) {
             const screenEnv={...process.env,QT_QPA_PLATFORM:'wayland'};
             const config=JSON.parse(execFileSync('kscreen-doctor',['-j'],{env:screenEnv,encoding:'utf8',stdio:['ignore','pipe',fd]}));
@@ -89,6 +101,10 @@ Window {visible:true;width:300;height:300;minimumWidth:100;minimumHeight:100;tit
         if(/ReferenceError:|TypeError:|Cannot read property|QQmlComponent: Component is not ready/.test(log))throw Error('QML error in isolated run; inspect local log');
         console.log('PASS 40 isolated load/resize/overlay/unload cycles; private compositor and clients survived');
     } finally {
+        if(modifierLoaded&&kwin.exitCode===null) {
+            try{dbus('/Effects','org.kde.kwin.Effects.unloadEffect','tilekeep-control-marker');}catch{}
+            try{dbus('/Effects','org.kde.kwin.Effects.unloadEffect','tilekeep-control-observer');}catch{}
+        }
         if(app&&app.exitCode===null)app.kill('SIGTERM');
         if(kwin.exitCode===null)kwin.kill('SIGTERM');
         fs.closeSync(fd);

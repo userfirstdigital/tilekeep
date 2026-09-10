@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -14,6 +14,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::Options;
 
 const PLUGIN: &str = "tilekeep-runtime";
+const MODIFIER_OBSERVER: &str = "tilekeep-control-observer";
+const MODIFIER_MARKER: &str = "tilekeep-control-marker";
 static STOP: AtomicBool = AtomicBool::new(false);
 
 pub fn is_plasma_wayland() -> bool {
@@ -23,12 +25,21 @@ pub fn is_plasma_wayland() -> bool {
 
 pub fn run(options: Options) -> Result<(), String> {
     require("qdbus6")?;
-    let _snapshot_bridge = if crate::control::current().is_some() { Some(crate::snapshots::bridge()?) } else { None };
-    // Own the integration for the entire process lifetime. Without this lock an
-    // older instance can unload the replacement script when that instance exits.
+    // Own the integration before touching any KWin-global scripts or effects.
+    // A second Tilekeep process must not disturb the running instance while it
+    // discovers that the integration is already owned.
     let lock_dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     let lock_path = lock_dir.join(format!("tilekeep-kwin-{}.lock", unsafe { libc::geteuid() }));
     let _owner = acquire_lock(&lock_path)?;
+    let _snapshot_bridge = if crate::control::current().is_some() { Some(crate::snapshots::bridge()?) } else { None };
+    let modifier_effect = !options.dry_run
+        && match load_modifier_effect() {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("Ctrl-drag free placement is unavailable: {e}");
+                false
+            }
+        };
     STOP.store(false, Ordering::Relaxed);
     let source = include_str!("kwin.qml")
         .replace("__TILEKEEP_GAP__", &options.gap.to_string())
@@ -87,6 +98,9 @@ pub fn run(options: Options) -> Result<(), String> {
     let _ = std::fs::remove_file(&path);
     if let Err(e) = started {
         let _ = scripting(&["unloadScript", PLUGIN]);
+        if modifier_effect {
+            unload_modifier_effect();
+        }
         return Err(e);
     }
     log::info!("native Plasma/Wayland integration loaded; Super+Shift+Q stops it");
@@ -145,7 +159,75 @@ pub fn run(options: Options) -> Result<(), String> {
             .output();
         let _ = scripting(&["unloadScript", PLUGIN]);
     }
+    if modifier_effect {
+        unload_modifier_effect();
+    }
     Ok(())
+}
+
+fn effect_dir(name: &str) -> Result<PathBuf, String> {
+    let base = directories::BaseDirs::new().ok_or("could not locate the per-user data directory")?;
+    Ok(base.data_dir().join("kwin/effects").join(name))
+}
+
+fn install_effect_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    if std::fs::read(path).is_ok_and(|existing| existing == contents) {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or("invalid KWin effect path")?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("could not stage {}: {e}", path.display()))?;
+    temporary.write_all(contents).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    temporary.persist(path).map_err(|e| format!("could not install {}: {}", path.display(), e.error))?;
+    Ok(())
+}
+
+fn install_modifier_effects() -> Result<(), String> {
+    for (name, metadata, script) in [
+        (
+            MODIFIER_OBSERVER,
+            include_bytes!("effects/tilekeep-control-observer/metadata.json").as_slice(),
+            include_bytes!("effects/tilekeep-control-observer/contents/code/main.js").as_slice(),
+        ),
+        (
+            MODIFIER_MARKER,
+            include_bytes!("effects/tilekeep-control-marker/metadata.json").as_slice(),
+            include_bytes!("effects/tilekeep-control-marker/contents/code/main.js").as_slice(),
+        ),
+    ] {
+        let directory = effect_dir(name)?;
+        install_effect_file(&directory.join("metadata.json"), metadata)?;
+        install_effect_file(&directory.join("contents/code/main.js"), script)?;
+    }
+    Ok(())
+}
+
+fn effect(method: &str, name: &str) -> Result<String, String> {
+    output_text(qdbus(&["/Effects", &format!("org.kde.kwin.Effects.{method}"), name]))
+}
+
+fn load_modifier_effect() -> Result<(), String> {
+    install_modifier_effects()?;
+    // Clean up state left by a killed process before enabling this instance.
+    let _ = effect("unloadEffect", MODIFIER_MARKER);
+    let _ = effect("unloadEffect", MODIFIER_OBSERVER);
+    let result = match effect("loadEffect", MODIFIER_OBSERVER) {
+        Ok(value) if value == "true" => Ok(()),
+        Ok(_) => Err("KWin could not load its Tilekeep modifier observer".into()),
+        Err(error) => Err(error),
+    };
+    if result.is_err() {
+        // A failed D-Bus reply does not prove KWin did not finish loading it.
+        // Always restore an inert state before continuing without Ctrl-drag.
+        unload_modifier_effect();
+    }
+    result
+}
+
+fn unload_modifier_effect() {
+    let _ = effect("unloadEffect", MODIFIER_MARKER);
+    let _ = effect("unloadEffect", MODIFIER_OBSERVER);
 }
 
 fn acquire_lock(path: &Path) -> Result<File, String> {

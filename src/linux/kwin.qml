@@ -27,6 +27,10 @@ Item {
     property var previewGeometry: null
     property var previewArea: null
     property string previewZone: "center"
+    property bool previewFree: false
+    property bool modifierQueryPending: false
+    property var modifierListener: null
+    property var modifierAfterPending: null
     property int sequence: 1
     property var pendingSnapshot: null
     property var resizeGuides: []
@@ -69,6 +73,18 @@ Item {
         if (!parent) monitor.root = replacement;
         else if (parent.first === old) parent.first = replacement;
         else parent.second = replacement;
+    }
+    function collapseVacatedSlot(monitor,slot) {
+        if(slot===monitor.root||slot.windows.length)return false;
+        let empty=slot;
+        while(empty!==monitor.root) {
+            const parent=empty.parent;if(!parent)break;
+            const sibling=parent.first===empty?parent.second:parent.first;
+            replaceNode(parent,sibling,monitor);
+            if(!subtreeEmpty(sibling)||sibling===monitor.root)break;
+            empty=sibling;
+        }
+        return true;
     }
     function splitSlot(monitor, target, axis, newFirst, w) {
         const added = leaf(); added.windows = [w];
@@ -518,10 +534,40 @@ Item {
         const offset=newFirst?0:first+gap,extent=newFirst?first:usable-first;
         return axis==="x"?{x:r.x+offset,y:r.y,width:extent,height:r.height}:{x:r.x,y:r.y+offset,width:r.width,height:extent};
     }
-    function drop(w,p,stack) {
+    function freeDropPreview(w,p) {
+        function copy(n,parent) {
+            const c=Object.assign({},n,{parent});
+            if(n.kind==="leaf")c.windows=n.windows.slice();
+            else {c.first=copy(n.first,c);c.second=copy(n.second,c);}return c;
+        }
+        const roots=monitors.map(m=>m.root),oldSequence=sequence;
+        try {
+            for(const m of monitors)m.root=copy(m.root,null);
+            let hit=slotAt(p);if(!hit)return null;
+            const source=slotOf(w);
+            if(source&&source[1]!==hit[1]) {detach(w);collapseVacatedSlot(source[0],source[1]);hit=slotAt(p);}
+            if(!hit)return null;
+            const empty=vacantForDrop(hit[1],w);
+            const z=empty?fittingEmptyZone(w,hit[2],emptyZone(hit[2],p)):zone(hit[2],p);
+            if(z==="unavailable")return {rect:hit[2],area:hit[2],zone:z};
+            if(!drop(w,p,false,false))return null;
+            const found=slotOf(w);if(!found)return null;
+            return {rect:rects(found[0]).get(found[1]),area:empty?hit[2]:null,zone:z};
+        }finally {for(let i=0;i<monitors.length;i++)monitors[i].root=roots[i];sequence=oldSequence;}
+    }
+    function drop(w,p,stack,free) {
         if(floating.has(w))return false;
-        const hit=slotAt(p); if(!hit)return false;
-        const [m,target,r]=hit,source=slotOf(w);
+        let hit=slotAt(p); if(!hit)return false;
+        if(free) {
+            const validation=freeDropPreview(w,p);
+            if(!validation||validation.zone==="unavailable")return false;
+        }
+        let source=slotOf(w);
+        if(free&&source&&source[1]!==hit[1]) {
+            detach(w);collapseVacatedSlot(source[0],source[1]);
+            hit=slotAt(p);if(!hit)return false;source=null;
+        }
+        const [m,target,r]=hit;
         if(vacantForDrop(target,w)) {
             const z=fittingEmptyZone(w,r,emptyZone(r,p));
             if(z==="unavailable")return false;
@@ -763,6 +809,22 @@ Item {
         return node;
     }
     function compact(m) { m.root=compactNode(m.root);m.root.parent=null; }
+    function queryFreeModifier(listener,fresh) {
+        if(!enabled){listener(false);return;}
+        if(modifierQueryPending) {
+            if(fresh)modifierAfterPending=listener;else modifierListener=listener;
+            return;
+        }
+        modifierQueryPending=true;modifierListener=listener;
+        freeModifierCall.arguments=["tilekeep-control-marker"];freeModifierCall.call();
+    }
+    function modifierQueryFinished(value) {
+        modifierQueryPending=false;
+        const listener=modifierListener;modifierListener=null;
+        if(listener)listener(!!value);
+        const after=modifierAfterPending;modifierAfterPending=null;
+        if(after)queryFreeModifier(after,true);
+    }
     function cycle(delta) {
         if(paused||!displaysReady())return;
         const f=focused&&slotOf(focused);if(!f||f[1].windows.length<2)return;
@@ -770,10 +832,10 @@ Item {
         const next=(visible.indexOf(focused)+delta+visible.length)%visible.length;
         focused=visible[next];s.active=s.windows.indexOf(focused);apply();Workspace.raiseWindow(focused);Workspace.activeWindow=focused;
     }
-    function showPreview(w,r,full,z) {
+    function showPreview(w,r,full,z,free) {
         if(!enabled||paused||dryRun||!tileable(w)||floating.has(w))return;
         previewOwner=w;
-        previewArea=full||null;previewZone=z||"center";
+        previewArea=full||null;previewZone=z||"center";previewFree=!!free;
         const surface=full||r;
         const old=previewGeometry;
         if(!old||old.x!==r.x||old.y!==r.y||old.width!==r.width||old.height!==r.height) {
@@ -785,7 +847,7 @@ Item {
     }
     function hidePreview(w) {
         if(w&&previewOwner!==w)return;
-        dragPreview.visible=false;previewOwner=null;previewGeometry=null;previewArea=null;
+        dragPreview.visible=false;previewOwner=null;previewGeometry=null;previewArea=null;previewFree=false;
         resizeGuides=[];resizeGuide.visible=false;
     }
     function showResizeGuide(w,snap) {
@@ -813,7 +875,10 @@ Item {
             interactiveWindows.add(w);
             placementDeadline.stop();placementSpacing.stop();
             placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
-            if(!paused&&!displayTransition&&tileable(w)&&!floating.has(w))drag={epoch:displayEpoch,rect:windowRect(w),moving:w.move,cursor:Workspace.cursorPos?{x:Workspace.cursorPos.x,y:Workspace.cursorPos.y}:null,edges:[],raw:null};
+            if(!paused&&!displayTransition&&tileable(w)&&!floating.has(w)) {
+                drag={epoch:displayEpoch,rect:windowRect(w),moving:w.move,cursor:Workspace.cursorPos?{x:Workspace.cursorPos.x,y:Workspace.cursorPos.y}:null,edges:[],raw:null,free:false};
+                if(drag.moving)queryFreeModifier(value=>{if(drag)drag.free=value;},false);
+            }
         };
         handlers.stepped=g=>{
             if(!drag||paused||!displaysReady()||drag.epoch!==displayEpoch)return;
@@ -843,11 +908,20 @@ Item {
                 if(!geometryMatches(windowRect(w),snap.rect,0)&&!dryRun)w.frameGeometry=snap.rect;
                 return;
             }
+            queryFreeModifier(value=>{if(drag&&drag.moving){drag.free=value;handlers.preview();}},false);
+            handlers.preview();
+        };
+        handlers.preview=()=>{
+            if(!drag||!drag.moving||paused||!displaysReady()||drag.epoch!==displayEpoch)return;
+            if(drag.free) {
+                const plan=freeDropPreview(w,Workspace.cursorPos);if(!plan){hidePreview(w);return;}
+                showPreview(w,plan.rect,plan.area,plan.zone,true);return;
+            }
             const hit=slotAt(Workspace.cursorPos);if(!hit){hidePreview(w);return;}
             const empty=vacantForDrop(hit[1],w);
             const z=empty?fittingEmptyZone(w,hit[2],emptyZone(hit[2],Workspace.cursorPos)):zone(hit[2],Workspace.cursorPos);
             const r=dropPreview(w,hit,z);
-            showPreview(w,r,empty?hit[2]:null,z);
+            showPreview(w,r,empty?hit[2]:null,z,false);
         };
         handlers.finished=()=>{
             // Keep the interactive guard until the new tree is committed:
@@ -857,7 +931,13 @@ Item {
             // KWin restores the starting geometry before emitting Finished when
             // Escape cancels a drag. The cursor can still be over another slot.
             if(d.moving) {
-                if(!geometryMatches(windowRect(w),d.rect))drop(w,Workspace.cursorPos,false);
+                if(!geometryMatches(windowRect(w),d.rect)) {
+                    const point={x:Workspace.cursorPos.x,y:Workspace.cursorPos.y};
+                    queryFreeModifier(value=>{
+                        if(enabled&&!paused&&displaysReady()&&d.epoch===displayEpoch&&windowConnections.has(w)&&tileable(w))drop(w,point,false,value);
+                        resizePreviewWindows.clear();interactiveWindows.delete(w);apply();
+                    },true);return;
+                }
             } else {
                 // Wayland can report Finished before the client's Escape restore
                 // frame arrives. Keep the guard and provisional neighbors until
@@ -896,7 +976,8 @@ Item {
         restoreResizePreview();
         pendingResizeEnds.clear();resizeFinishTimer.stop();
         placementDeadline.stop();placementSpacing.stop();recoveryTimer.stop();workAreaTimer.stop();
-        interactiveWindows.clear();expectedGeometry.clear();deferredPlacements.clear();placementQueue=[];currentPlacement=null;hidePreview();
+        interactiveWindows.clear();expectedGeometry.clear();deferredPlacements.clear();placementQueue=[];currentPlacement=null;
+        modifierListener=null;modifierAfterPending=null;hidePreview();
     }
     function stop() {
         quiesce();
@@ -1034,6 +1115,7 @@ Item {
     Timer { id: workAreaTimer; interval: 500; running: true; repeat: true; onTriggered: root.workAreasChanged() }
 
     DBusCall { id: unloadCall }
+    DBusCall { id: freeModifierCall;service:"org.kde.KWin";path:"/Effects";dbusInterface:"org.kde.kwin.Effects";method:"isEffectLoaded";onFinished:(returnValue)=>root.modifierQueryFinished(returnValue[0]);onFailed:root.modifierQueryFinished(false) }
     DBusCall { id: snapshotSave; service:"com.userfirst.Tilekeep";path:"/Tilekeep";dbusInterface:"com.userfirst.Tilekeep";method:"SaveSnapshot";onFailed:console.log("Tilekeep: snapshot save failed") }
     DBusCall { id: snapshotLoad; service:"com.userfirst.Tilekeep";path:"/Tilekeep";dbusInterface:"com.userfirst.Tilekeep";method:"ReadSnapshot";onFinished:(returnValue)=>root.restoreSnapshot(returnValue[0]);onFailed:console.log("Tilekeep: snapshot load failed") }
     DBusCall { id: snapshotRestored;service:"com.userfirst.Tilekeep";path:"/Tilekeep";dbusInterface:"com.userfirst.Tilekeep";method:"SnapshotRestored";onFailed:console.log("Tilekeep: snapshot status could not be saved") }
@@ -1086,7 +1168,7 @@ Item {
         Text {
             visible: !!root.previewArea
             anchors.horizontalCenter: parent.horizontalCenter; anchors.top: parent.top; anchors.topMargin: 12
-            text: root.previewZone==="unavailable"?"Too small for this app":root.previewZone==="center"?"Full space":root.previewZone.includes("-")?"Quarter space":"Half space"
+            text: (root.previewFree?"Free · ":"")+(root.previewZone==="unavailable"?"Too small for this app":root.previewZone==="center"?"Full space":root.previewZone.includes("-")?"Quarter space":"Half space")
             color: "white"; style: Text.Outline; styleColor: "#203040"; font.pixelSize: 16
         }
     }

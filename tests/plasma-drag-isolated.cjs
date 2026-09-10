@@ -20,9 +20,19 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
     let replies=[];input.stdout.on('data',data=>replies.push(...data.toString().trim().split('\n')));
     const reply=async()=>{for(let i=0;i<100;i++){if(replies.length)return replies.shift();if(input.exitCode!==null)throw Error('Private input failed: '+input.exitCode);await wait(20);}throw Error('Private input timed out');};
     const send=async line=>{input.stdin.write(line+'\n');if(await reply()!=='OK')throw Error('Input acknowledgement missing');await wait(100);};
+    const controlDrag=process.argv.includes('--control-drag');
+    const effectLoaded=name=>dbus('/Effects','org.kde.kwin.Effects.isEffectLoaded',name)==='true';
     let loaded=false;
     try {
         if(await reply()!=='READY')throw Error('Input not ready');
+        if(controlDrag) {
+            if(effectLoaded('tilekeep-control-marker'))throw Error('Ctrl marker started loaded');
+            await send('key 29 1');
+            if(effectLoaded('tilekeep-control-marker'))throw Error('ordinary Ctrl press loaded the drag-only marker');
+            await send('key 29 0');
+            if(effectLoaded('tilekeep-control-marker'))throw Error('Ctrl release did not unload the marker effect');
+            console.log('PASS ordinary Ctrl stays inert outside a window drag');
+        }
         let source=baseline?execFileSync('git',['show','v0.2.6:src/linux/kwin.qml'],{cwd:path.join(__dirname,'..'),encoding:'utf8'}):fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8');
         source=source.replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
         const test=`
@@ -46,18 +56,25 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      root.testB=Workspace.stackingOrder.find(w=>String(w.caption)==='Tilekeep isolated B');
      root.dragCheck(root.testA&&root.testB,'owned windows missing');
      const a=root.leaf(),b=root.leaf(),empty=root.leaf();root.assign(a,root.testA);root.assign(b,root.testB);
-     const rows={kind:'split',axis:'y',ratio:.5,first:a,second:b,parent:null};a.parent=rows;b.parent=rows;
-     m.root={kind:'split',axis:'x',ratio:.5,first:rows,second:empty,parent:null};rows.parent=m.root;empty.parent=m.root;
+     if(root.dragCase===28) {
+       m.root={kind:'split',axis:'x',ratio:.25,first:a,second:b,parent:null};a.parent=m.root;b.parent=m.root;
+     } else {
+       const rows={kind:'split',axis:'y',ratio:.5,first:a,second:b,parent:null};a.parent=rows;b.parent=rows;
+       m.root={kind:'split',axis:'x',ratio:.5,first:rows,second:empty,parent:null};rows.parent=m.root;empty.parent=m.root;
+     }
      root.apply();root.dragPhase=1;return;
    }
    if(root.dragPhase===1){
      root.sourceRect=root.windowRect(root.testA);root.fixedRect=root.windowRect(root.testB);
-     root.targetRect=root.dragCase<9||root.dragCase===18||(root.dragCase>=19&&root.dragCase<23)?root.rects(m).get(root.slotOf(root.testA)[1]):root.rects(m).get(m.root.second);
+     root.targetRect=root.dragCase===28?root.rects(m).get(root.slotOf(root.testB)[1]):root.dragCase<9||root.dragCase===18||(root.dragCase>=19&&root.dragCase<23)?root.rects(m).get(root.slotOf(root.testA)[1]):root.rects(m).get(m.root.second);
      const index=root.dragCase%9,r=root.targetRect;
-     const x=root.dragCase>=19?[.2,.8][(root.dragCase-19)%2]:[.1,.5,.9][index%3];
-     const y=root.dragCase>=19?[.2,.8][Math.floor((root.dragCase-19)%4/2)]:[.1,.5,.9][Math.floor(index/3)];
+     const x=root.dragCase===27?.5:root.dragCase===28?.95:root.dragCase>=19?[.2,.8][(root.dragCase-19)%2]:[.1,.5,.9][index%3];
+     const y=root.dragCase>=27?.5:root.dragCase>=19?[.2,.8][Math.floor((root.dragCase-19)%4/2)]:[.1,.5,.9][Math.floor(index/3)];
      const p={x:r.x+r.width*x,y:r.y+r.height*y};
-     root.wantedZone=root.dragCase>=19?'center':root.fittingEmptyZone(root.testA,r,root.emptyZone(r,p));root.wantedRect=root.emptyPart(r,root.wantedZone);
+     if(root.dragCase>=27) {
+       const plan=root.freeDropPreview(root.testA,p);root.dragCheck(!!plan,'free preview plan missing');
+       root.wantedZone=plan.zone;root.wantedRect=plan.rect;
+     } else {root.wantedZone=root.dragCase>=19?'center':root.fittingEmptyZone(root.testA,r,root.emptyZone(r,p));root.wantedRect=root.emptyPart(r,root.wantedZone);}
      console.log('TKDRAG READY',JSON.stringify({case:root.dragCase,start:{x:root.sourceRect.x+root.sourceRect.width*.4,y:root.sourceRect.y+12},point:p}));root.dragPhase=2;root.dragTicks=0;return;
    }
    if(root.dragPhase===2){
@@ -66,7 +83,8 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      if(root.dragCase===19)dragPreview.contentItem.grabToImage(result=>result.saveToFile('${rootDir}/hover-full.png'));
      root.dragCheck(root.previewZone===root.wantedZone,'hover zone mismatch '+JSON.stringify({expected:root.wantedZone,actual:root.previewZone}));
      root.dragCheck(root.geometryMatches(root.previewGeometry,root.wantedRect,1),'hover extent mismatch');
-     root.dragCheck(root.geometryMatches(root.previewArea,root.targetRect,1),'full-space guides missing');
+     if(root.dragCase<27)root.dragCheck(root.geometryMatches(root.previewArea,root.targetRect,1),'full-space guides missing');
+     else root.dragCheck(root.previewFree,'Ctrl drag was not shown as free');
      root.dragCheck(Workspace.activeWindow===root.testA,'preview stole focus');
      console.log('TKDRAG HOVER',root.dragCase,root.wantedZone);root.dragPhase=3;root.dragTicks=0;return;
    }
@@ -74,10 +92,12 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      if(root.testA.move||root.interactiveWindows.size||root.dragTicks<8)return;
      const expected=root.dragCase===18?root.sourceRect:root.wantedRect;
      root.dragCheck(root.geometryMatches(root.windowRect(root.testA),expected,2),'release mismatch '+JSON.stringify({case:root.dragCase,expected,actual:root.windowRect(root.testA)}));
-     root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'unrelated window moved');
+     if(root.dragCase<27)root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'unrelated window moved');
+     if(root.dragCase===27)root.dragCheck(root.area(root.windowRect(root.testB))>root.area(root.fixedRect),'source neighbor did not fill the collapsed hole');
+     if(root.dragCase===28)root.dragCheck(root.area(root.windowRect(root.testB))<root.area(root.fixedRect),'occupied destination did not yield space');
      root.dragCheck(!dragPreview.visible,'preview survived release');
      console.log('TKDRAG PASS',root.dragCase);root.dragCase++;root.dragTicks=0;
-     if(root.dragCase===27){console.log('TKDRAG DONE');this.stop();}else root.dragPhase=0;
+     if(root.dragCase===${controlDrag?29:27}){console.log('TKDRAG DONE');this.stop();}else root.dragPhase=0;
    }
  }catch(e){console.log('TKDRAG FAIL',String(e));this.stop();}}}
  `;
@@ -94,14 +114,19 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
                 if(line.includes('TKDRAG FAIL')){await wait(300);throw Error('Native drag regression failed');}
                 if(line.includes('TKDRAG READY')) {
                     const data=JSON.parse(line.slice(line.indexOf('{')));
-                    await send('move '+data.start.x+' '+data.start.y);await send('button 1');
+                    await send('move '+data.start.x+' '+data.start.y);
+                    if(controlDrag&&data.case>=27)await send('key 29 1');
+                    await send('button 1');
                     await send('move '+(data.start.x+30)+' '+(data.start.y+35));
                     await send('move '+data.point.x+' '+data.point.y);
+                    if(controlDrag&&data.case>=27&&!effectLoaded('tilekeep-control-marker'))throw Error('Ctrl drag did not load the marker effect');
                 } else if(line.includes('TKDRAG HOVER')) {
                     if(line.includes('HOVER 18 ')){await send('key 1 1');await send('key 1 0');}
                     await send('button 0');
+                    if(controlDrag&&/HOVER (27|28) /.test(line))await send('key 29 0');
+                    if(controlDrag&&/HOVER (27|28) /.test(line)&&effectLoaded('tilekeep-control-marker'))throw Error('Ctrl drag marker survived Ctrl release');
                 } else if(line.includes('TKDRAG DONE')) {
-                    console.log('PASS 26 native drag/hover/drop targets plus Escape; expanded full-space target verified');return;
+                    console.log(controlDrag?'PASS 28 native drag/hover/drop targets plus Escape; Ctrl free source and occupied destination verified':'PASS 26 native drag/hover/drop targets plus Escape; expanded full-space target verified');return;
                 }
             }
         }

@@ -376,6 +376,43 @@ impl Tree {
         }
     }
 
+    /// Remove one particular empty slot and give its rectangle to its sibling.
+    /// Unlike `compact`, this deliberately leaves every other vacancy alone: a
+    /// free-move should close the hole it just created without consuming a
+    /// different empty destination the user may be dragging toward.
+    pub fn collapse_empty_slot(&mut self, slot: NodeId) -> bool {
+        if slot == self.root || !self.is_empty_slot(slot) {
+            return false;
+        }
+        let mut empty = slot;
+        while let Some(parent) = self.nodes.get(empty.0).and_then(|n| n.parent) {
+            let Some((_, _, first, second)) = self.split_info(parent) else { break };
+            let sibling = if first == empty { second } else { first };
+            let grandparent = self.nodes[parent.0].parent;
+            self.nodes[sibling.0].parent = grandparent;
+            match grandparent {
+                None => self.root = sibling,
+                Some(grandparent) => match &mut self.nodes[grandparent.0].kind {
+                    NodeKind::Split { first, .. } if *first == parent => *first = sibling,
+                    NodeKind::Split { second, .. } if *second == parent => *second = sibling,
+                    _ => break,
+                },
+            }
+            if !self.subtree_empty(sibling) || sibling == self.root {
+                break;
+            }
+            empty = sibling;
+        }
+        true
+    }
+
+    fn subtree_empty(&self, id: NodeId) -> bool {
+        match self.split_info(id) {
+            None => self.is_empty_slot(id),
+            Some((_, _, first, second)) => self.subtree_empty(first) && self.subtree_empty(second),
+        }
+    }
+
     fn compact_node(&mut self, id: NodeId) -> Option<NodeId> {
         match self.split_info(id) {
             None => {
@@ -853,6 +890,23 @@ mod tests {
         assert_eq!(t.slots(), vec![a]);
         assert_eq!(rect(&t, a), AREA);
         let _ = b; // unreachable now
+    }
+
+    #[test]
+    fn targeted_collapse_removes_only_the_requested_empty_slot() {
+        let mut t = Tree::new();
+        t.assign(t.root(), A);
+        let b = t.split_slot(t.root(), X, false, B);
+        let c = t.split_slot(b, Y, false, C);
+        let a = t.slot_of(A).unwrap();
+        t.remove_window(A);
+        t.remove_window(C);
+        assert!(t.collapse_empty_slot(a));
+        assert_eq!(t.slots().len(), 2, "C's independent vacancy is preserved");
+        assert!(t.slot_of(B).is_some());
+        assert!(t.is_empty_slot(c));
+        assert!(t.collapse_empty_slot(c), "the remaining vacancy can be collapsed later");
+        assert_eq!(t.slots().len(), 1);
     }
 
     #[test]

@@ -56,7 +56,7 @@ Every visible rectangle is a **slot**. Drag a window onto another window:
            TOP
     ┌─────────────────┐
     │        ↑        │
-LEFT│ ←    CENTER   → │RIGHT      Center → swap (Ctrl+Center → stack)
+LEFT│ ←    CENTER   → │RIGHT      Center → swap
     │        ↓        │           Edge   → split the target, dragged window on that side
     └─────────────────┘
           BOTTOM
@@ -64,6 +64,14 @@ LEFT│ ←    CENTER   → │RIGHT      Center → swap (Ctrl+Center → stack
 
 Closing a window leaves its slot **empty**; the next window you open takes the most recently
 emptied slot, so nothing else moves. `Super+Shift+K` compacts when *you* decide.
+
+Hold **Ctrl while moving a window** for a free move. Tilekeep closes only the source hole made
+by that window, so its immediate source-side neighbor can reclaim the released space; unrelated
+vacancies remain untouched. The destination behavior stays spatial: empty destinations still
+offer full/half/quarter placement, and an occupied destination yields space to the dragged
+window instead of swapping. The preview is labeled **Free** and shows the final compacted result.
+Release Ctrl before the mouse button to return to an ordinary move. Use `Super+Shift+G` to create
+a stack explicitly; stacking is no longer overloaded onto Ctrl-drag.
 
 On **Plasma Wayland**, resizing follows the connected shared edge. Aligned windows immediately
 below/above a vertical edge (or beside a horizontal edge) stay aligned, and windows across it
@@ -89,8 +97,10 @@ cargo run --release -- [--gap 1] [--dry-run] [--list]
 
 On Linux, both Plasma 6 Wayland and EWMH-compatible X11 desktops are supported. Plasma Wayland
 uses a temporary KWin script because only the compositor is allowed to manage native Wayland
-windows; the script is loaded when `wm` starts and unloaded when it quits. `qdbus6` (normally
-installed with Plasma) is required. X11 uses the standard EWMH and RandR protocols directly.
+windows; the script is loaded when `wm` starts and unloaded when it quits. A small user-local
+KWin effect reports Ctrl only during an active window move, without raw input-device access;
+it is also loaded and unloaded with Tilekeep. `qdbus6` (normally installed with Plasma) is
+required. X11 uses the standard EWMH and RandR protocols directly.
 Only one Plasma integration instance runs at a time. Starting a second does not disturb the first.
 On Wayland, resize completion is asynchronous: sleeping clients are reconciled after they
 resume drawing. If a monitor disconnects, its layout stays cached instead of being reassigned
@@ -120,7 +130,7 @@ journalctl -f _COMM=kwin_wayland | grep Tilekeep
 | `Super+Shift+K` | Compact the monitor under the cursor (remove empty slots) |
 | `Super+Shift+L` | Re-read monitors and re-apply the layout |
 | `Super+Shift+F` | Toggle the foreground window between tiled and floating |
-| `Super+Shift+G` | Plasma Wayland: stack the active window into the slot under the cursor |
+| `Super/Win+Shift+G` | Stack the active window into the slot under the cursor |
 | `Super+Shift+N` / `Super+Shift+B` | Next / previous window in the focused stack |
 | `Super+Shift+Q` | Quit |
 
@@ -163,9 +173,6 @@ is refreshed automatically, including panels on the top, bottom, left, or right 
 - **Other Wayland compositors** are not yet supported: Wayland intentionally has no generic API
   for managing other applications' windows. Plasma 6 is supported through KWin; use an X11
   session on GNOME, Sway, Hyprland, and other compositors for now.
-- **Plasma stacking modifier**: KWin scripts do not expose the keyboard modifiers held during a
-  title-bar drag. Use `Super+Shift+G` with the pointer over the destination slot instead of
-  Ctrl+Center to create a stack on Plasma Wayland. Center-drop still swaps.
 - Unless a startup snapshot is selected, layout is rebuilt from open windows at launch. No tab strip for stacks or per-app rules.
 - On Windows, `Win+Shift+C`, `R` and `P` are registered by the OS itself, which is why wm uses `K`, `L` and `B` instead; any chord another program already owns is logged at start and skipped.
 - During a title-bar drag, Windows clamps the cursor to the work area, so a window cannot literally be dropped on the taskbar; releasing at the bottom edge of the work area outside any slot snaps it back.
@@ -200,6 +207,9 @@ For real pointer-driven hover/drop checks in that private session, run
 `node tests/plasma-isolated.cjs --native-drag` (add `--fractional-scale` for 125%).
 This verifies corner quarters, edge halves, full-space centers, release geometry, and Escape,
 including the dragged window's original slot. See [requirements and regression evidence](docs/verification-0.2.7.md).
+Add `--control-drag` to load the modifier effect in the private OpenGL compositor and inject real
+Ctrl press/release events. That mode also verifies source-hole collapse, occupied-destination
+yielding, modifier cleanup, and the Free preview without touching the login desktop.
 
 With Tilekeep running on Plasma, `python tests/tray-live.py --allow-settings-changes` exercises
 real tray callbacks for pause, gap, login startup, and snapshot save/load/startup selection.
@@ -230,8 +240,8 @@ may include personal desktop contents: keep them local. Restart Tilekeep after t
 
 Physical mouse/keyboard testing also covers title-bar swapping, edge drops, border resizing,
 Escape cancellation, floating-window drags, stacking, stack cycling, compaction, and re-tiling.
-The stack shortcut uses `Super+Shift+G` because
-Plasma reserves `Super+Shift+S` for Spectacle; testing only D-Bus action invocation misses this
+The stack shortcut uses `Super+Shift+G`; Ctrl-drag is reserved for free placement. Plasma reserves
+`Super+Shift+S` for Spectacle; testing only D-Bus action invocation misses this
 kind of shortcut collision. Remote-input test connections must outlive the approval dialog.
 
 The Plasma drag highlight uses its own persistent, click-through overlay. It does not use
