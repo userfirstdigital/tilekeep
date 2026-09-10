@@ -842,6 +842,36 @@ test('restarting adopts valid actual frames instead of replaying a stale default
     assert.deepEqual({...c.rects(m).get(c.slotOf(w)[1])},{...w.frameGeometry});
     assert.deepEqual({...c.rects(m).get(c.slotOf(other)[1])},{...other.frameGeometry});
 });
+test('restart adoption tolerates the subpixel seams produced by 125% scaling',()=>{
+    const c=backend(),first=window(c),m=c.monitors[0];c.gap=1;m.area={x:0,y:0,width:6144,height:1698};
+    const frames=[
+        {x:658,y:1,width:812.8,height:912}, {x:1,y:916,width:655.2,height:780.8},
+        {x:657,y:914,width:814.4,height:783.2}, {x:3930,y:914,width:395.2,height:783.2},
+        {x:1472,y:914.6,width:2456.8,height:781.6}, {x:1472,y:1,width:2456,height:912},
+        {x:1,y:1,width:656,height:914.4}, {x:4735.2,y:914.4,width:1408,height:783.2},
+        {x:4735,y:1,width:1408,height:913.6}, {x:3929,y:1,width:804.8,height:912.8},
+    ];
+    const windows=frames.map((frame,i)=>i===0?first:{frameGeometry:frame,desktops:[1],activities:[]});
+    first.frameGeometry=frames[0];
+    function stale(list,parent) {
+        if(list.length===1){const slot=c.leaf();slot.parent=parent;c.assign(slot,list[0]);return slot;}
+        const split={kind:'split',axis:list.length%2?'y':'x',ratio:.5,preserveSpace:false,parent,first:null,second:null};
+        const middle=Math.ceil(list.length/2);split.first=stale(list.slice(0,middle),split);split.second=stale(list.slice(middle),split);return split;
+    }
+    m.root=stale(windows,null);
+    c.adoptExistingGeometry();
+    const actual=c.rects(m);
+    const moved=[];
+    for(let i=0;i<windows.length;i++) {
+        const adopted=actual.get(c.slotOf(windows[i])[1]);
+        if(!c.geometryMatches(adopted,frames[i],3))moved.push({i,adopted,wanted:frames[i]});
+    }
+    assert.deepEqual(moved,[]);
+    const placements=c.placements();
+    assert.equal(placements.every(p=>p.tolerance===3),true,'the first reconciliation retains fractional native frames');
+    c.apply();
+    assert.equal(m.adopted,false,'the relaxed startup tolerance is one-shot');
+});
 test('snapshot round trip keeps deliberately small resized vacancies exact',()=>{
     const c=backend(),w=window(c),m=c.monitors[0];c.gap=1;
     w.internalId='a';const before=c.rects(m).get(m.root),after={...before,width:before.width-20};

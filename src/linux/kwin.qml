@@ -348,7 +348,11 @@ Item {
             const map=rects(m);
             for (const s of leaves(m.root)) {
                 const stack=s.windows.filter(w=>visibleHere(w)).length>1;
-                for(let i=0;i<s.windows.length;i++) out.push({window:s.windows[i],rect:map.get(s),output:m.output,active:stack&&i===s.active});
+                for(let i=0;i<s.windows.length;i++) {
+                    const placement={window:s.windows[i],rect:map.get(s),output:m.output,active:stack&&i===s.active};
+                    if(m.adopted)placement.tolerance=3;
+                    out.push(placement);
+                }
             }
         }
         return out.sort((a,b)=>Number(a.active)-Number(b.active));
@@ -372,6 +376,9 @@ Item {
         if (!enabled || paused || !displaysReady() || interactiveWindows.size) return;
         refreshWorkAreas();
         const next=placements();
+        // Adoption tolerance is only for this first reconciliation. Future
+        // layout changes return to the normal tighter geometry tolerance.
+        for(const m of monitors)m.adopted=false;
         placementDeadline.stop();placementSpacing.stop();
         placementQueue=[];currentPlacement=null;expectedGeometry.clear();deferredPlacements.clear();
         for(const p of next) {
@@ -392,7 +399,7 @@ Item {
         // Matching geometry does not mean exclusive ownership: a native KWin
         // tile can still couple this window to other windows during edge drags.
         if(p.window.tile)p.window.tile.unmanage(p.window);
-        if(p.window.output===p.output&&geometryMatches(windowRect(p.window),p.rect)) { finishCurrentPlacement();return; }
+        if(p.window.output===p.output&&geometryMatches(windowRect(p.window),p.rect,p.tolerance)) { finishCurrentPlacement();return; }
         if(p.window.output!==p.output)Workspace.sendClientToScreen(p.window,p.output);
         expectedGeometry.set(p.window,p.rect);
         // A move can complete synchronously; arm the timer before sending it.
@@ -610,10 +617,11 @@ Item {
     }
     // Recut only empty space. Occupied rectangles are constraints, not ratios
     // to be scaled when an unrelated ancestor divider moves.
-    function layoutAround(items,bounds,depth) {
+    function layoutAround(items,bounds,depth,tolerance) {
+        const fuzz=tolerance||0;
         if(!items.length)return leaf();
         if(depth>60)return null;
-        if(items.length===1&&geometryMatches(items[0].rect,bounds,0))return Object.assign({},items[0].slot,{windows:items[0].slot.windows.slice(),parent:null});
+        if(items.length===1&&geometryMatches(items[0].rect,bounds,fuzz))return Object.assign({},items[0].slot,{windows:items[0].slot.windows.slice(),parent:null});
         const cuts=[];
         for(const axis of ["x","y"]) {
             const start=bounds[axis],size=axis==="x"?bounds.width:bounds.height,end=start+size;
@@ -624,7 +632,7 @@ Item {
                 const first=[],second=[];
                 for(const item of items) {
                     const lo=item.rect[axis],hi=lo+(axis==="x"?item.rect.width:item.rect.height);
-                    if(hi<=p)first.push(item);else if(lo>=p+gap)second.push(item);else break;
+                    if(hi<=p+fuzz)first.push(item);else if(lo>=p+gap-fuzz)second.push(item);else break;
                 }
                 if(first.length+second.length!==items.length)continue;
                 cuts.push({axis,p,first,second,score:Math.abs(first.length-second.length)});
@@ -636,7 +644,7 @@ Item {
         const c=cuts[0],a=Object.assign({},bounds),b=Object.assign({},bounds);
         if(c.axis==="x"){a.width=c.p-bounds.x;b.x=c.p+gap;b.width=rectRight(bounds)-b.x;}
         else {a.height=c.p-bounds.y;b.y=c.p+gap;b.height=rectBottom(bounds)-b.y;}
-        const first=layoutAround(c.first,a,depth+1),second=layoutAround(c.second,b,depth+1);
+        const first=layoutAround(c.first,a,depth+1,fuzz),second=layoutAround(c.second,b,depth+1,fuzz);
         if(!first||!second)return null;
         const s={kind:"split",axis:c.axis,ratio:(c.p-bounds[c.axis])/Math.max(1,(c.axis==="x"?bounds.width:bounds.height)-gap),preserveSpace:true,first,second,parent:null};
         first.parent=s;second.parent=s;return s;
@@ -1052,6 +1060,10 @@ Item {
     function adoptExistingGeometry() {
         // A runtime upgrade must not retile an already valid desktop. Rebuild
         // from actual frames, including user adjustments made while stopped.
+        // Fractional display scaling exposes frame coordinates in device-pixel
+        // increments (for example .2/.4/.8), so adjacent edges can differ from
+        // the logical one-pixel gap by less than a pixel.
+        const fuzz=3;
         for(const m of monitors) {
             if(m.online===false)continue;
             const bounds=inset(m.area),windows=allWindows(m.root),items=[];
@@ -1059,13 +1071,13 @@ Item {
                 const s=leaf();s.windows=[w];items.push({slot:s,rect:windowRect(w)});
             }
             if(!items.length)continue;
-            if(items.some((item,i)=>item.rect.x<bounds.x||item.rect.y<bounds.y||rectRight(item.rect)>rectRight(bounds)||rectBottom(item.rect)>rectBottom(bounds)||items.slice(0,i).some(other=>intersects(item.rect,other.rect,gap))))continue;
-            const tree=layoutAround(items,bounds,0);if(!tree)continue;
+            if(items.some((item,i)=>item.rect.x<bounds.x-fuzz||item.rect.y<bounds.y-fuzz||rectRight(item.rect)>rectRight(bounds)+fuzz||rectBottom(item.rect)>rectBottom(bounds)+fuzz||items.slice(0,i).some(other=>intersects(item.rect,other.rect,-fuzz))))continue;
+            const tree=layoutAround(items,bounds,0,fuzz);if(!tree)continue;
             const map=new Map();compute(tree,bounds,map);
-            if(items.some(item=>{const s=leaves(tree).find(s=>s.windows.includes(item.slot.windows[0]));return !geometryMatches(map.get(s),item.rect,0);}))continue;
+            if(items.some(item=>{const s=leaves(tree).find(s=>s.windows.includes(item.slot.windows[0]));return !geometryMatches(map.get(s),item.rect,fuzz);}))continue;
             const vacant=leaves(tree).filter(s=>!s.windows.length);
             for(const w of windows.filter(w=>!visibleHere(w)))assign(vacant.shift()||leaves(tree)[0],w);
-            m.root=tree;
+            m.root=tree;m.adopted=true;
         }
     }
     function start() {
