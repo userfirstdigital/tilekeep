@@ -81,7 +81,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
      root.dragCheck(root.testA&&root.testB,'owned windows missing');
      root.floating.delete(root.testA);root.floating.delete(root.testB);
      const a=root.leaf(),b=root.leaf(),empty=root.leaf();root.assign(a,root.testA);root.assign(b,root.testB);
-     if(root.dragCase===28) {
+     if(root.dragCase===30) {
        m.root=b;b.parent=null;root.floating.add(root.testA);
        root.placeWindow(root.testA,{x:80,y:80,width:300,height:300});
      } else {
@@ -92,22 +92,26 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
    }
    if(root.dragPhase===1){
      root.sourceRect=root.windowRect(root.testA);root.fixedRect=root.windowRect(root.testB);
-     root.targetRect=root.dragCase===28?root.rects(m).get(root.slotOf(root.testB)[1]):root.dragCase<9||root.dragCase===18||(root.dragCase>=19&&root.dragCase<23)?root.rects(m).get(root.slotOf(root.testA)[1]):root.rects(m).get(m.root.second);
+     root.targetRect=root.dragCase===30||root.dragCase===27||root.dragCase===28?root.rects(m).get(root.slotOf(root.testB)[1]):root.dragCase<9||root.dragCase===18||(root.dragCase>=19&&root.dragCase<23)||root.dragCase===29?root.rects(m).get(root.slotOf(root.testA)[1]):root.rects(m).get(m.root.second);
      const index=root.dragCase%9,r=root.targetRect;
-     const x=root.dragCase===27?.5:root.dragCase===28?.95:root.dragCase>=19?[.2,.8][(root.dragCase-19)%2]:[.1,.5,.9][index%3];
+     const x=root.dragCase===27||root.dragCase===29?.5:root.dragCase===28||root.dragCase===30?.95:root.dragCase>=19?[.2,.8][(root.dragCase-19)%2]:[.1,.5,.9][index%3];
      const y=root.dragCase>=27?.5:root.dragCase>=19?[.2,.8][Math.floor((root.dragCase-19)%4/2)]:[.1,.5,.9][Math.floor(index/3)];
      const p={x:r.x+r.width*x,y:r.y+r.height*y};
-     if(root.dragCase===28) {
+     if(root.dragCase===30) {
        const plan=root.floatingDropPreview(root.testA,p);root.dragCheck(!!plan,'floating dock preview plan missing');
        root.wantedZone=plan.zone;root.wantedRect=plan.rect;
-     } else if(root.dragCase===27){root.wantedZone='floating';root.wantedRect=null;}
+     } else if(root.dragCase===29){root.wantedZone='floating';root.wantedRect=null;}
+     else if(root.dragCase===27||root.dragCase===28){
+       root.wantedZone=root.dragCase===27?'center':'right';
+       root.wantedRect=root.dropPreview(root.testA,[m,root.slotOf(root.testB)[1],r],root.wantedZone);
+     }
      else {root.wantedZone=root.dragCase>=19?'center':root.fittingEmptyZone(root.testA,r,root.emptyZone(r,p));root.wantedRect=root.emptyPart(r,root.wantedZone);}
      console.log('TKDRAG READY',JSON.stringify({case:root.dragCase,start:{x:root.sourceRect.x+root.sourceRect.width*.4,y:root.sourceRect.y+12},point:p}));root.dragPhase=2;root.dragTicks=0;return;
    }
    if(root.dragPhase===2){
      if(!root.testA.move||root.dragTicks<8)return;
-     if(root.dragCase!==27&&!dragPreview.visible)return;
-     if(root.dragCase===27){root.dragCheck(!dragPreview.visible,'tiled-to-floating drag showed a tile target');console.log('TKDRAG HOVER',root.dragCase,root.wantedZone);root.dragPhase=3;root.dragTicks=0;return;}
+     if(root.dragCase!==29&&!dragPreview.visible)return;
+     if(root.dragCase===29){root.dragCheck(!dragPreview.visible,'tiled-to-floating drag showed a tile target');console.log('TKDRAG HOVER',root.dragCase,root.wantedZone);root.dragPhase=3;root.dragTicks=0;return;}
      if(root.dragCase===0)dragPreview.contentItem.grabToImage(result=>result.saveToFile('${rootDir}/hover.png'));
      if(root.dragCase===19)dragPreview.contentItem.grabToImage(result=>result.saveToFile('${rootDir}/hover-full.png'));
      root.dragCheck(root.previewZone===root.wantedZone,'hover zone mismatch '+JSON.stringify({expected:root.wantedZone,actual:root.previewZone}));
@@ -120,13 +124,15 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
    if(root.dragPhase===3){
      if(root.testA.move||root.interactiveWindows.size||root.dragTicks<8)return;
      const expected=root.dragCase===18?root.sourceRect:root.wantedRect;
-     if(root.dragCase!==27)root.dragCheck(root.geometryMatches(root.windowRect(root.testA),expected,2),'release mismatch '+JSON.stringify({case:root.dragCase,expected,actual:root.windowRect(root.testA)}));
+     if(root.dragCase!==29)root.dragCheck(root.geometryMatches(root.windowRect(root.testA),expected,2),'release mismatch '+JSON.stringify({case:root.dragCase,expected,actual:root.windowRect(root.testA)}));
      if(root.dragCase<27)root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'unrelated window moved');
-     if(root.dragCase===27){root.dragCheck(root.floating.has(root.testA)&&!root.slotOf(root.testA),'tiled window did not become floating');root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'source neighbor moved during pull-out');root.dragCheck(root.leaves(m.root).some(s=>root.vacantHere(s)&&root.geometryMatches(root.rects(m).get(s),root.sourceRect,1)),'source tile did not remain vacant');}
-     if(root.dragCase===28){root.dragCheck(!root.floating.has(root.testA)&&!!root.slotOf(root.testA),'floating window did not become tiled');root.dragCheck(root.area(root.windowRect(root.testB))<root.area(root.fixedRect),'occupied destination did not yield space');}
+     if(root.dragCase===27){root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.sourceRect,1),'full occupied drop did not swap the target into the source');root.dragCheck(root.slotOf(root.testA)[1]!==root.slotOf(root.testB)[1],'swapped windows remained in one slot');}
+     if(root.dragCase===28){root.dragCheck(root.area(root.windowRect(root.testB))<root.area(root.fixedRect),'partial occupied drop did not split the target');root.dragCheck(root.leaves(m.root).some(s=>root.vacantHere(s)&&root.geometryMatches(root.rects(m).get(s),root.sourceRect,1)),'partial occupied drop lost the source vacancy');}
+     if(root.dragCase===29){root.dragCheck(root.floating.has(root.testA)&&!root.slotOf(root.testA),'tiled window did not become floating');root.dragCheck(root.geometryMatches(root.windowRect(root.testB),root.fixedRect,1),'source neighbor moved during pull-out');root.dragCheck(root.leaves(m.root).some(s=>root.vacantHere(s)&&root.geometryMatches(root.rects(m).get(s),root.sourceRect,1)),'source tile did not remain vacant');}
+     if(root.dragCase===30){root.dragCheck(!root.floating.has(root.testA)&&!!root.slotOf(root.testA),'floating window did not become tiled');root.dragCheck(root.area(root.windowRect(root.testB))<root.area(root.fixedRect),'occupied destination did not yield space');}
      root.dragCheck(!dragPreview.visible,'preview survived release');
      console.log('TKDRAG PASS',root.dragCase);root.dragCase++;root.dragTicks=0;
-     if(root.dragCase===${controlDrag?29:27}){console.log('TKDRAG DONE');this.stop();}else root.dragPhase=0;
+     if(root.dragCase===${controlDrag?31:29}){console.log('TKDRAG DONE');this.stop();}else root.dragPhase=0;
    }
  }catch(e){console.log('TKDRAG FAIL',String(e));this.stop();}}}
  `;
@@ -144,18 +150,18 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
                 if(line.includes('TKDRAG READY')) {
                     const data=JSON.parse(line.slice(line.indexOf('{')));
                     await send('move '+data.start.x+' '+data.start.y);
-                    if(controlDrag&&data.case>=27)await send('key 29 1');
+                    if(controlDrag&&(data.case===29||data.case===30))await send('key 29 1');
                     await send('button 1');
                     await send('move '+(data.start.x+30)+' '+(data.start.y+35));
                     await send('move '+data.point.x+' '+data.point.y);
-                    if(controlDrag&&data.case>=27&&!effectLoaded('tilekeep-control-marker'))throw Error('Ctrl drag did not load the marker effect');
+                    if(controlDrag&&(data.case===29||data.case===30)&&!effectLoaded('tilekeep-control-marker'))throw Error('Ctrl drag did not load the marker effect');
                 } else if(line.includes('TKDRAG HOVER')) {
                     if(line.includes('HOVER 18 ')){await send('key 1 1');await send('key 1 0');}
                     await send('button 0');
-                    if(controlDrag&&/HOVER (27|28) /.test(line))await send('key 29 0');
-                    if(controlDrag&&/HOVER (27|28) /.test(line)&&effectLoaded('tilekeep-control-marker'))throw Error('Ctrl drag marker survived Ctrl release');
+                    if(controlDrag&&/HOVER (29|30) /.test(line))await send('key 29 0');
+                    if(controlDrag&&/HOVER (29|30) /.test(line)&&effectLoaded('tilekeep-control-marker'))throw Error('Ctrl drag marker survived Ctrl release');
                 } else if(line.includes('TKDRAG DONE')) {
-                    console.log(controlDrag?'PASS 29 native drag/hover/drop targets plus Escape; Ctrl tile-to-float and float-to-tile transitions verified':'PASS 27 native drag/hover/drop targets plus Escape; expanded full-space target verified');return;
+                    console.log(controlDrag?'PASS 31 native drag/hover/drop targets plus Escape; occupied swap/split and Ctrl tile-to-float/float-to-tile transitions verified':'PASS 29 native drag/hover/drop targets plus Escape; occupied full swap and edge split verified');return;
                 }
             }
         }

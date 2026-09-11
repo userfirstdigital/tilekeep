@@ -469,7 +469,9 @@ Item {
     }
     function zone(r,p) {
         const x=(p.x-r.x)/r.width,y=(p.y-r.y)/r.height;
-        if(x>=.25&&x<=.75&&y>=.25&&y<=.75)return "center";
+        // Match empty-space targeting: the full tile is the easy/default
+        // choice, while a deliberate outer-edge hover selects a half.
+        if(x>=.15&&x<=.85&&y>=.15&&y<=.85)return "center";
         return Math.abs(x-.5)>=Math.abs(y-.5)?(x<.5?"left":"right"):(y<.5?"top":"bottom");
     }
     function vacantHere(slot) { return !slot.windows.some(w=>visibleHere(w)); }

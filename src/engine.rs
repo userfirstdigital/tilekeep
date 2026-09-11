@@ -806,7 +806,9 @@ mod tests {
     #[test]
     fn centre_drop_swaps() {
         let mut d = two_up();
-        assert_eq!(d.drop_window(A, Point { x: 750, y: 250 }, false), DropEffect::Swapped);
+        // Twenty percent into both dimensions is comfortably inside the full
+        // target, proving swapping is the default rather than a tiny bullseye.
+        assert_eq!(d.drop_window(A, Point { x: 600, y: 100 }, false), DropEffect::Swapped);
         assert_eq!(rect(&d, A), Rect::new(500, 0, 500, 500));
         assert_eq!(rect(&d, B), Rect::new(0, 0, 500, 500));
     }

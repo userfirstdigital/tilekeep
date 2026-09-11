@@ -246,6 +246,31 @@ test('drop corner uses the dominant axis, not unconditional left/right priority'
     assert.equal(c.zone(r,{x:20,y:1}),'top');assert.equal(c.zone(r,{x:1,y:20}),'left');
     assert.equal(c.zone(r,{x:50,y:50}),'center');
 });
+test('an occupied full-tile target spans the central seventy percent and swaps slots',()=>{
+    const c=backend(),a=window(c),m=c.monitors[0],b={caption:'other'};
+    c.splitSlot(m,m.root,'x',false,b);
+    const source=c.slotOf(a)[1],target=c.slotOf(b)[1];
+    const sourceRect={...c.rects(m).get(source)},targetRect={...c.rects(m).get(target)};
+    const p={x:targetRect.x+targetRect.width*.2,y:targetRect.y+targetRect.height*.2};
+    assert.equal(c.zone(targetRect,p),'center');
+    assert.deepEqual({...c.dropPreview(a,[m,target,targetRect],'center')},targetRect);
+    assert.equal(c.drop(a,p,false,false),true);
+    assert.equal(c.slotOf(a)[1],target);assert.equal(c.slotOf(b)[1],source);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(a)[1])},targetRect);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(b)[1])},sourceRect);
+});
+test('occupied outer bands still split the target into a selected half',()=>{
+    const c=backend(),a=window(c),m=c.monitors[0],b={caption:'other'};
+    c.splitSlot(m,m.root,'x',false,b);
+    const source=c.slotOf(a)[1],target=c.slotOf(b)[1],r=c.rects(m).get(target);
+    const p={x:r.x+r.width*.9,y:r.y+r.height*.5};
+    const preview=c.dropPreview(a,[m,target,r],'right');
+    assert.equal(c.zone(r,p),'right');assert.ok(c.area(preview)<c.area(r));
+    assert.equal(c.drop(a,p,false,false),true);
+    assert.deepEqual({...c.rects(m).get(c.slotOf(a)[1])},{...preview});
+    assert.equal(c.slotOf(b)[1]===c.slotOf(a)[1],false);
+    assert.equal(c.vacantHere(source),true);
+});
 test('minimized or floating deferred windows are not moved on recovery',()=>{
     for(const mode of ['minimized','floating']) {
         const c=backend();const w=window(c,{async:true});c.apply();

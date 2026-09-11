@@ -56,8 +56,10 @@ pub enum DropZone {
     Bottom,
 }
 
-/// The centre zone spans the middle half of the slot in each dimension.
-pub const CENTER_ZONE_HALF_EXTENT: f32 = 0.25;
+/// The centre zone spans the middle 70% of the slot in each dimension.
+/// This makes swapping onto the full tile the default; the outer 15% bands
+/// remain available for an intentional half-tile placement.
+pub const CENTER_ZONE_HALF_EXTENT: f32 = 0.35;
 
 /// Which zone of `rect` the point falls in. Points outside are projected as if
 /// on the nearest edge, so callers should hit-test the slot first.
@@ -170,23 +172,23 @@ mod tests {
     }
 
     #[test]
-    fn centre_zone_is_the_middle_half() {
+    fn centre_zone_is_the_middle_seventy_percent() {
         assert_eq!(drop_zone(R, Point { x: 500, y: 250 }), DropZone::Center);
-        assert_eq!(drop_zone(R, Point { x: 260, y: 130 }), DropZone::Center); // u=-0.24, v=-0.24
-        assert_eq!(drop_zone(R, Point { x: 740, y: 370 }), DropZone::Center);
+        assert_eq!(drop_zone(R, Point { x: 160, y: 80 }), DropZone::Center); // u=-0.34, v=-0.34
+        assert_eq!(drop_zone(R, Point { x: 840, y: 420 }), DropZone::Center);
         assert_eq!(
-            drop_zone(R, Point { x: 250, y: 250 }),
+            drop_zone(R, Point { x: 150, y: 250 }),
             DropZone::Center,
-            "exactly at the centre-zone boundary (u=-0.25)"
+            "exactly at the centre-zone boundary (u=-0.35)"
         );
     }
 
     #[test]
     fn edge_zones_pick_the_dominant_axis() {
-        assert_eq!(drop_zone(R, Point { x: 100, y: 250 }), DropZone::Left);
-        assert_eq!(drop_zone(R, Point { x: 900, y: 250 }), DropZone::Right);
-        assert_eq!(drop_zone(R, Point { x: 500, y: 20 }), DropZone::Top);
-        assert_eq!(drop_zone(R, Point { x: 500, y: 480 }), DropZone::Bottom);
+        assert_eq!(drop_zone(R, Point { x: 140, y: 250 }), DropZone::Left);
+        assert_eq!(drop_zone(R, Point { x: 860, y: 250 }), DropZone::Right);
+        assert_eq!(drop_zone(R, Point { x: 500, y: 70 }), DropZone::Top);
+        assert_eq!(drop_zone(R, Point { x: 500, y: 430 }), DropZone::Bottom);
         // Near the top-left corner but further from centre horizontally than vertically.
         assert_eq!(drop_zone(R, Point { x: 50, y: 100 }), DropZone::Left);
         // Exact corner: tie goes to the horizontal zone.

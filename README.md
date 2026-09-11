@@ -56,7 +56,7 @@ Every visible rectangle is a **slot**. Drag a window onto another window:
            TOP
     ┌─────────────────┐
     │        ↑        │
-LEFT│ ←    CENTER   → │RIGHT      Center → swap
+LEFT│ ←    CENTER   → │RIGHT      Full tile → swap places
     │        ↓        │           Edge   → split the target, dragged window on that side
     └─────────────────┘
           BOTTOM
@@ -152,8 +152,9 @@ panels, popups, or shell surfaces. Fixed-size dialogs are left alone. Minimised 
 windows, and windows on another virtual desktop, keep their slot and are not moved until they come back.
 On Plasma, these inactive slots do not impose minimum-size limits on neighboring windows.
 Empty-space drops use the center for the whole area, edge centers for halves, and corners for
-quarters. The full-space hover target covers the central 70% of both width and height; the outer
-15% bands select halves or quarters. The Plasma preview outlines the whole area, shows subdivision guides, and highlights
+quarters. The full-space hover target covers the central 70% of both width and height; on an
+occupied tile that full target swaps the two tiles. The outer 15% bands select halves (or quarters
+in empty space). The Plasma preview outlines the whole area, shows subdivision guides, and highlights
 the selected portion. A quarter too small for the app falls back to a fitting half or the whole
 area; an area that cannot fit the app is labeled and leaves the layout unchanged on release.
 On Plasma, fit uses the application's reported minimum client size plus title bar/borders,
