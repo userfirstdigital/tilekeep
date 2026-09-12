@@ -8,7 +8,7 @@ const snapshot=JSON.parse(fs.readFileSync(args[snapshotIndex+1],'utf8'));
 const screenshotIndex=args.indexOf('--screenshot');
 const dbus=(...a)=>execFileSync('qdbus6',['org.kde.KWin',...a],{encoding:'utf8'}).trim();
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'tilekeep-zones-')),file=path.join(dir,'zones.qml'),id='TKZONES'+Date.now();
-const source=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
+const source=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_FLOAT_SECONDARY_WINDOWS__','true').replace('__TILEKEEP_DRY_RUN__','false');
 const qml=`
     property int phase: 0
     property int zoneIndex: 0

@@ -8,6 +8,7 @@ mod x11;
 pub struct Options {
     pub dry_run: bool,
     pub gap: i32,
+    pub float_secondary_windows: bool,
 }
 
 pub fn run(options: Options) -> Result<(), String> {

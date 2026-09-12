@@ -6,7 +6,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     time::{Duration, Instant},
 };
-use windowmanager::control::{Action, Controller};
+use windowmanager::control::{Action, Command, Controller};
 
 #[test]
 fn rename_cancel_delete_and_startup_selection_via_controller() {
@@ -33,6 +33,10 @@ fn rename_cancel_delete_and_startup_selection_via_controller() {
     fs::write(&reply, "Work & café '$`\n").unwrap();
     fs::write(&exit, "0").unwrap();
     let c = Controller::start(None).unwrap();
+    assert!(c.state().settings.float_secondary_windows);
+    c.action(Action::FloatSecondaryWindows);
+    assert!(!c.state().settings.float_secondary_windows);
+    assert!(matches!(windowmanager::control::drain().as_slice(), [Command::FloatSecondaryWindows(false)]));
     c.action(Action::StartupSnapshot(Some(id.into())));
     c.action(Action::RenameSnapshot(id.into()));
     let wait = |predicate: &dyn Fn() -> bool| {

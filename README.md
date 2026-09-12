@@ -4,7 +4,8 @@
 The default development branch is `master`.
 
 Tilekeep has a native tray menu for pause/resume, gap size, retile/compact, saved snapshots,
-login startup, and update status. Settings are saved per user. `wm` remains the development binary name.
+secondary-window behavior, login startup, and update status. Settings are saved per user. `wm`
+remains the development binary name.
 Use **Unstack active window** in the tray to separate a window sharing another window's slot.
 
 Install the built/downloaded executable with `--install`, then run the installed copy. Linux:
@@ -151,6 +152,18 @@ Visible, titled, movable and resizable top-level application windows that are no
 panels, popups, or shell surfaces. Fixed-size dialogs are left alone. Minimised or maximised
 windows, and windows on another virtual desktop, keep their slot and are not moved until they come back.
 On Plasma, these inactive slots do not impose minimum-size limits on neighboring windows.
+
+**Float new windows from existing apps** is enabled by default in the tray. Native dialogs already
+float based on their window type; this setting also catches compose windows, pop-outs, and other
+temporary windows that apps such as Electron expose as ordinary top-level windows. A normal window
+created after Tilekeep starts floats at the app-selected size and position when another managed
+window from the same app already exists. Windows present at startup are never reclassified, saved
+snapshot placement takes priority, and changing the setting affects only windows opened afterward.
+Because some apps do not publish an owner relationship, the portable fallback is app identity: a
+later independent window from the same app floats too. Turn the tray setting off if an app's normal
+multi-window workflow should always tile automatically; any window can still be toggled with
+`Super+Shift+F` or docked with Ctrl-title-bar-drag on Plasma Wayland.
+
 Empty-space drops use the center for the whole area, edge centers for halves, and corners for
 quarters. The full-space hover target covers the central 70% of both width and height; on an
 occupied tile that full target swaps the two tiles. The outer 15% bands select halves (or quarters

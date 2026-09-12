@@ -24,7 +24,7 @@ Window {visible:true;width:220;height:260;minimumWidth:100;minimumHeight:100;tit
  Rectangle {anchors.fill:parent;color:'#344424';Text {anchors.centerIn:parent;text:'Display recovery test B';color:'white'}}}}
 `);
     app=spawn('qml6',[fixture],{stdio:'ignore'});await wait(800);if(app.exitCode!==null)throw Error('Test windows could not start');
-    let source=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
+    let source=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_FLOAT_SECONDARY_WINDOWS__','true').replace('__TILEKEEP_DRY_RUN__','false');
     for(const f of ['start','tileable','readDisplayState','refreshWorkAreas'])source=source.replace('function '+f+'(','function production'+f+'(');
     const test=`
  property var a: null

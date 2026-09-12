@@ -8,7 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::engine::{Desktop, DropEffect, RESIZE_TOLERANCE_PX};
 use crate::geometry::{is_pure_move, Rect};
-use crate::tree::WindowId;
+use crate::tree::{AppIdentity, WindowId};
 use crate::win32::events::{self, EventHooks, EventKind, RawEvent};
 use crate::win32::hotkeys::{self, Hotkey};
 use crate::win32::overlay::Overlay;
@@ -18,6 +18,7 @@ use crate::win32::{ctrl_held, cursor_pos, dpi, hwnd, monitors, window, window_id
 pub struct Options {
     pub dry_run: bool,
     pub gap: i32,
+    pub float_secondary_windows: bool,
 }
 
 const PREVIEW_INTERVAL_MS: u32 = 16;
@@ -117,6 +118,7 @@ pub fn run(opts: Options) -> Result<(), String> {
                     app.opts.gap = g;
                     app.apply();
                 }
+                C::FloatSecondaryWindows(value) => app.opts.float_secondary_windows = value,
                 C::Retile => app.on_hotkey(Hotkey::Retile.id()),
                 C::Unstack => {
                     if !crate::control::paused() {
@@ -160,6 +162,23 @@ fn kill_pump_timer(timer: usize) {
 }
 
 impl App {
+    fn app_identity(h: windows::Win32::Foundation::HWND) -> Option<AppIdentity> {
+        if let Some(executable) = window::executable(h) {
+            return Some(AppIdentity(executable.to_string_lossy().to_lowercase()));
+        }
+        let class = window::query(h).class_name.to_lowercase();
+        (!class.is_empty()).then_some(AppIdentity(class))
+    }
+
+    fn has_same_app_window(&self, h: windows::Win32::Foundation::HWND, identity: &AppIdentity) -> bool {
+        window::enumerate_tileable().into_iter().any(|other| {
+            let id = window_id(other);
+            other != h
+                && (self.desktop.contains(id) || self.desktop.is_floating(id))
+                && Self::app_identity(other).as_ref() == Some(identity)
+        })
+    }
+
     fn snapshot_windows(&self) -> Vec<crate::snapshots::AppWindow> {
         window::enumerate_tileable()
             .into_iter()
@@ -402,8 +421,15 @@ impl App {
         // *before* a window lands on it — otherwise the new window is assigned to a monitor the
         // engine has never heard of and gets no slot at all.
         self.desktop.sync_monitors(&monitors::enumerate());
-        // TODO(task 4): pass the window's app identity so a reopened app reclaims its slot.
-        if self.desktop.window_appeared(w, monitors::monitor_of(h), None) {
+        let identity = Self::app_identity(h);
+        if self.opts.float_secondary_windows
+            && identity.as_ref().is_some_and(|id| self.has_same_app_window(h, id))
+            && self.desktop.window_appeared_floating(w, identity.clone())
+        {
+            log::info!("floating new secondary window {}", window::describe(h));
+            return true;
+        }
+        if self.desktop.window_appeared(w, monitors::monitor_of(h), identity) {
             log::info!("tracking {}", window::describe(h));
             self.apply();
             return true;

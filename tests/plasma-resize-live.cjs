@@ -27,7 +27,7 @@ let app,loaded=false;
     if(dbus('/Scripting','org.kde.kwin.Scripting.isScriptLoaded','tilekeep-runtime')==='true')throw Error('Stop Tilekeep first; this test never stops a user runtime itself.');
     app=spawn('qml6',[fixture],{stdio:['ignore','ignore','pipe']});let appErrors='';app.stderr.on('data',b=>appErrors+=b);
     await wait(700);if(app.exitCode!==null)throw Error(appErrors);
-    let source=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
+    let source=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_FLOAT_SECONDARY_WINDOWS__','true').replace('__TILEKEEP_DRY_RUN__','false');
     source=source.replace('function tileable(w)','function productionTileable(w)').replace('function start()','function productionStart()').replace('function refreshWorkAreas()','function productionRefreshWorkAreas()');
     source=source.replace('function displaysReady()','function productionDisplaysReady()').replace('function pollDisplays()','function productionPollDisplays()');
     source=source.replace('drag.raw=raw;',`console.log('${marker}','STEP',JSON.stringify({g,raw,before:drag.rect,cursor:Workspace.cursorPos,start:drag.cursor,edges:drag.edges}));drag.raw=raw;`)

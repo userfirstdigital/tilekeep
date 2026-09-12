@@ -11,14 +11,14 @@ function backend() {
     const functions = source.slice(source.indexOf('    function rect('), source.indexOf('    Component.onCompleted:'));
     const timer = () => ({running:false, restart(){this.running=true;}, stop(){this.running=false;}});
     const context = vm.createContext({
-        console:{log(){}}, gap:10, dryRun:false, enabled:true, paused:false, minRatio:.05, maxRatio:.95,
+        console:{log(){}}, gap:10, floatSecondaryWindows:true, dryRun:false, enabled:true, paused:false, minRatio:.05, maxRatio:.95,
         monitors:[], focused:null, floating:new Set(), identities:new Map(), expectedGeometry:new Map(),
         deferredPlacements:new Map(), interactiveWindows:new Set(), placementQueue:[], currentPlacement:null,
         placementAttempt:0, windowConnections:new Map(), sequence:1,pendingSnapshot:null,
         previewOwner:null,previewGeometry:null,previewArea:null,previewZone:'center',previewFree:false,
         modifierQueryPending:false,modifierListener:null,modifierAfterPending:null,
         dragPreview:{visible:false},resizeGuide:{visible:false},resizeGuides:[],resizePreviewWindows:new Map(),pendingResizeEnds:new Map(),
-        displayTransition:false,displayEpoch:0,displayFingerprint:'',displayStableTicks:0,displaySamples:[],pendingWindows:new Set(),deferredSnapshot:null,saveAfterDisplay:false,
+        displayTransition:false,displayEpoch:0,displayFingerprint:'',displayStableTicks:0,displaySamples:[],pendingWindows:new Set(),newWindows:new Set(),deferredSnapshot:null,saveAfterDisplay:false,
         placementDeadline:timer(), placementSpacing:timer(), recoveryTimer:timer(),workAreaTimer:timer(),resizeFinishTimer:timer(),
         KWin:{MaximizeArea:0},
         Workspace:{currentDesktop:1,currentActivity:'test',raiseWindow(){},hideOutline(){}},
@@ -552,6 +552,33 @@ test('a window that becomes eligible after windowAdded is enrolled without touch
     const floated=window(c);c.monitors.pop();c.detach(floated);c.floating.add(floated);c.Workspace.stackingOrder.push(floated);
     c.enrollWindows();assert.equal(c.slotOf(floated),null);assert.equal(c.floating.has(floated),true);
     assert.equal(c.allWindows(m.root).includes(late),true);
+});
+test('a newly added same-app window floats without consuming a vacancy or moving its parent',()=>{
+    const c=backend(),parent=window(c),m=c.monitors[0];
+    parent.desktopFileName='org.example.mail';parent.pid=42;c.Workspace.activeWindow=parent;
+    const before={...c.rects(m).get(c.slotOf(parent)[1])},tree=m.root;
+    const child={managed:true,normalWindow:true,moveable:true,resizeable:true,caption:'Compose',
+        desktopFileName:'org.example.mail',pid:42,output:1,frameGeometry:{x:200,y:150,width:420,height:360},
+        desktops:[1],activities:[],setMaximize(){}};
+    c.Workspace.stackingOrder=[parent,child];c.newWindows.add(child);
+    assert.equal(c.appeared(child),true);
+    assert.equal(c.floating.has(child),true);assert.equal(c.slotOf(child),null);
+    assert.equal(m.root,tree);assert.deepEqual({...c.rects(m).get(c.slotOf(parent)[1])},before);
+    assert.equal(c.newWindows.has(child),false);
+});
+test('secondary-window preference affects only new same-app windows',()=>{
+    for(const scenario of ['existing','disabled','different-app']) {
+        const c=backend(),parent=window(c);parent.desktopFileName='org.example.mail';parent.pid=42;
+        const child={managed:true,normalWindow:true,moveable:true,resizeable:true,caption:'Second',
+            desktopFileName:scenario==='different-app'?'org.example.notes':'org.example.mail',pid:42,
+            output:1,frameGeometry:{x:20,y:20,width:300,height:300},desktops:[1],activities:[],setMaximize(){}};
+        c.Workspace.activeWindow=parent;c.Workspace.stackingOrder=[parent,child];
+        if(scenario!=='existing')c.newWindows.add(child);
+        if(scenario==='disabled')c.floatSecondaryWindows=false;
+        assert.equal(c.appeared(child),true,scenario);
+        assert.equal(c.floating.has(child),false,scenario);
+        assert.ok(c.slotOf(child),scenario);
+    }
 });
 test('unstack separates overlapping windows into visible free space',()=>{
     const c=backend(),w=window(c),m=c.monitors[0],hidden={minimized:true};

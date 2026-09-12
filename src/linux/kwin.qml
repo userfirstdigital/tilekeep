@@ -8,6 +8,7 @@ Item {
     id: root
 
     property int gap: __TILEKEEP_GAP__
+    property bool floatSecondaryWindows: __TILEKEEP_FLOAT_SECONDARY_WINDOWS__
     property bool paused: false
     readonly property bool dryRun: __TILEKEEP_DRY_RUN__
     readonly property real minRatio: 0.05
@@ -42,6 +43,9 @@ Item {
     property int displayStableTicks: 0
     property var displaySamples: []
     property var pendingWindows: new Set()
+    // Populated only by live windowAdded signals. Windows already present when
+    // Tilekeep starts are deliberately never reclassified by this preference.
+    property var newWindows: new Set()
     property var deferredSnapshot: null
     property bool saveAfterDisplay: false
 
@@ -276,13 +280,25 @@ Item {
         if(!displayTransition)refreshWorkAreas();
     }
     function assign(slot,w) { slot.windows.push(w); slot.active=slot.windows.length-1; slot.vacated=null; slot.remembered=null; }
+    function hasSameAppParent(w) {
+        if(!floatSecondaryWindows)return false;
+        const id=identity(w);
+        if(!id)return false;
+        return (Workspace.stackingOrder||[]).some(other=>other!==w&&(slotOf(other)||floating.has(other))&&
+            identity(other)===id);
+    }
     function appeared(w) {
         if(!tileable(w)||slotOf(w)||floating.has(w))return false;
         if(!displaysReady()||!monitors.some(m=>m.online!==false)){pendingWindows.add(w);return false;}
         pendingWindows.delete(w);
-        if(pendingSnapshot&&restorePendingWindow(w))return true;
+        if(pendingSnapshot&&restorePendingWindow(w)){newWindows.delete(w);return true;}
         const m=monitorForOutput(w.output); if (!m) return false;
         const id=identity(w); identities.set(w,id);
+        if(newWindows.has(w)&&hasSameAppParent(w)) {
+            newWindows.delete(w);floating.add(w);
+            console.log("Tilekeep: floating new secondary window",id,String(w.caption));
+            return true;
+        }
         // Visually free slots can still contain minimized/off-desktop windows.
         // Prefer usable vacancies before reopening collapsed placeholders or
         // splitting an occupied slot, even when focus points at a small stack.
@@ -299,7 +315,7 @@ Item {
         candidates.sort((a,b)=>Number(b.monitor===m)-Number(a.monitor===m)||
             Number(b.slot.remembered===id)-Number(a.slot.remembered===id)||
             (b.slot.vacated||0)-(a.slot.vacated||0)||area(b.r)-area(a.r));
-        if(candidates.length){assign(candidates[0].slot,w);return true;}
+        if(candidates.length){assign(candidates[0].slot,w);newWindows.delete(w);return true;}
         const ls=leaves(m.root), remembered=ls.filter(s=>!s.windows.length&&s.remembered===id).sort((a,b)=>(b.vacated||0)-(a.vacated||0))[0];
         if (remembered) assign(remembered,w);
         else {
@@ -322,6 +338,7 @@ Item {
                 const r=map.get(target);splitSlot(m,target,chosen?chosen.axis:r.width>=r.height?"x":"y",false,w);
             }
         }
+        newWindows.delete(w);
         console.log("Tilekeep: tracking",id,String(w.caption));
         return true;
     }
@@ -331,8 +348,15 @@ Item {
         // Some apps publish their taskbar/normal-window metadata just after
         // KWin emits windowAdded. Pick them up once they become eligible while
         // preserving the explicit floating set.
-        for(const w of Workspace.stackingOrder)if(tileable(w)&&!slotOf(w)&&!floating.has(w))changed=appeared(w)||changed;
+        for(const w of Workspace.stackingOrder)if(tileable(w)&&!slotOf(w)&&!floating.has(w))changed=discoverWindow(w)||changed;
         if(changed)apply();
+    }
+    function discoverWindow(w) {
+        // Plasma may activate a just-mapped client before emitting windowAdded,
+        // and some apps publish normal-window metadata after both signals.
+        // Anything not observed during start() is still a genuinely new window.
+        if(!windowConnections.has(w)){newWindows.add(w);connectWindow(w);}
+        return appeared(w);
     }
     function detach(w) {
         const found=slotOf(w); if (!found) return;
@@ -342,6 +366,7 @@ Item {
     }
     function vanished(w) {
         pendingWindows.delete(w);
+        newWindows.delete(w);
         hidePreview(w);
         detach(w);floating.delete(w);identities.delete(w);expectedGeometry.delete(w);
         deferredPlacements.delete(w);interactiveWindows.delete(w);
@@ -1195,9 +1220,9 @@ Item {
 
     Connections {
         target: root.enabled ? Workspace : null
-        function onWindowAdded(w) { root.connectWindow(w);if(root.appeared(w))root.apply(); }
+        function onWindowAdded(w) { if(root.discoverWindow(w))root.apply(); }
         function onWindowRemoved(w) { root.removed(w); }
-        function onWindowActivated(w) { if(w){if(root.appeared(w))root.apply();root.focused=w;const f=root.slotOf(w);if(f)f[1].active=f[1].windows.indexOf(w);} }
+        function onWindowActivated(w) { if(w){if(root.discoverWindow(w))root.apply();root.focused=w;const f=root.slotOf(w);if(f)f[1].active=f[1].windows.indexOf(w);} }
         function onScreensChanged() { root.beginDisplayTransition(); }
         function onCurrentDesktopChanged() { root.apply(); }
         function onCurrentActivityChanged() { root.apply(); }
@@ -1283,6 +1308,8 @@ Item {
     ShortcutHandler { name: "TilekeepQuit"; text: "Tilekeep: quit"; sequence: "Meta+Shift+Q"; onActivated: root.stop() }
     ShortcutHandler { name: "TilekeepPause"; text: "Tilekeep: pause tiling"; onActivated: root.setPaused(true) }
     ShortcutHandler { name: "TilekeepResume"; text: "Tilekeep: resume tiling"; onActivated: root.setPaused(false) }
+    ShortcutHandler { name: "TilekeepFloatSecondaryOn"; text: "Tilekeep: float new secondary windows"; onActivated: root.floatSecondaryWindows=true }
+    ShortcutHandler { name: "TilekeepFloatSecondaryOff"; text: "Tilekeep: tile new secondary windows"; onActivated: root.floatSecondaryWindows=false }
     ShortcutHandler {name:"TilekeepSaveSnapshot";text:"Tilekeep: save snapshot";onActivated:root.saveSnapshot()}
     ShortcutHandler {name:"TilekeepLoadSnapshot";text:"Tilekeep: load snapshot";onActivated:{snapshotLoad.arguments=[JSON.stringify(root.snapshotWindows())];snapshotLoad.call();}}
     Instantiator {

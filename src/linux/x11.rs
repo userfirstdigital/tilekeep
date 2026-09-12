@@ -408,6 +408,8 @@ struct App {
     desktop: Desktop,
     opts: Options,
     known: HashSet<WindowId>,
+    new_windows: HashSet<WindowId>,
+    bootstrapped: bool,
     hotkeys: HashMap<u8, Hotkey>,
     drag: Option<Drag>,
     button_down: bool,
@@ -424,6 +426,8 @@ impl App {
             desktop: Desktop::new(opts.gap),
             opts,
             known: HashSet::new(),
+            new_windows: HashSet::new(),
+            bootstrapped: false,
             hotkeys,
             drag: None,
             button_down: false,
@@ -434,13 +438,18 @@ impl App {
     fn bootstrap(&mut self) {
         self.desktop.sync_monitors(&self.x.monitors());
         self.refresh_windows();
+        self.bootstrapped = true;
         self.apply();
     }
 
     fn refresh_windows(&mut self) {
         let windows = self.x.windows();
         let present: HashSet<WindowId> = windows.iter().copied().map(X11::window_id).collect();
+        if self.bootstrapped {
+            self.new_windows.extend(present.difference(&self.known).copied());
+        }
         for gone in self.known.difference(&present).copied().collect::<Vec<_>>() {
+            self.new_windows.remove(&gone);
             if self.desktop.window_vanished(gone) {
                 log::info!("vanished {gone:?}; its slot stays empty");
             }
@@ -450,12 +459,33 @@ impl App {
         self.desktop.sync_monitors(&monitors);
         let active = self.x.active_window().map(X11::window_id);
         let mut changed = false;
-        for window in windows {
+        for &window in &windows {
             let id = X11::window_id(window);
             if !self.desktop.contains(id) && !self.desktop.is_floating(id) && self.x.is_tileable(window) {
                 if let Some(monitor) = self.x.monitor_of(window, &monitors) {
-                    if self.desktop.window_appeared(id, monitor, self.x.identity(window)) {
-                        log::info!("tracking {}", self.x.describe(window));
+                    let identity = self.x.identity(window);
+                    let secondary = self.opts.float_secondary_windows
+                        && self.new_windows.contains(&id)
+                        && identity.as_ref().is_some_and(|app| {
+                            windows.iter().copied().any(|other| {
+                                let other_id = X11::window_id(other);
+                                other != window
+                                    && (self.desktop.contains(other_id) || self.desktop.is_floating(other_id))
+                                    && self.x.identity(other).as_ref() == Some(app)
+                            })
+                        });
+                    let tracked = if secondary {
+                        self.desktop.window_appeared_floating(id, identity)
+                    } else {
+                        self.desktop.window_appeared(id, monitor, identity)
+                    };
+                    if tracked {
+                        self.new_windows.remove(&id);
+                        log::info!(
+                            "{} {}",
+                            if secondary { "floating new secondary window" } else { "tracking" },
+                            self.x.describe(window)
+                        );
                         changed = true;
                     }
                 }
@@ -610,6 +640,7 @@ impl App {
                         self.opts.gap = g;
                         self.apply();
                     }
+                    C::FloatSecondaryWindows(value) => self.opts.float_secondary_windows = value,
                     C::Retile => {
                         self.hotkey(Hotkey::Retile);
                     }

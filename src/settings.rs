@@ -11,11 +11,12 @@ pub struct Settings {
     pub schema: u32,
     pub gap: i32,
     pub automatic_updates: bool,
+    pub float_secondary_windows: bool,
     pub startup_snapshot: Option<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { schema: 1, gap: 1, automatic_updates: true, startup_snapshot: None }
+        Self { schema: 1, gap: 1, automatic_updates: true, float_secondary_windows: true, startup_snapshot: None }
     }
 }
 pub fn config_dir() -> Result<PathBuf, String> {
@@ -89,7 +90,9 @@ mod tests {
         save(&p, &s).unwrap();
         assert_eq!(load(&p).unwrap(), s);
         fs::write(&p, r#"{"future":true,"gap":2}"#).unwrap();
-        assert_eq!(load(&p).unwrap().gap, 2);
+        let loaded = load(&p).unwrap();
+        assert_eq!(loaded.gap, 2);
+        assert!(loaded.float_secondary_windows, "older settings inherit the enabled default");
     }
     #[test]
     fn invalid_settings_are_preserved() {

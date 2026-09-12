@@ -12,7 +12,7 @@ const runId=`TKLIVE-${Date.now()}`;
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'tilekeep-live-'));
 const fixture=path.join(dir,'test.qml');
 const source=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8')
-    .replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
+    .replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_FLOAT_SECONDARY_WINDOWS__','true').replace('__TILEKEEP_DRY_RUN__','false');
 const testQml=`
     property int testStep: 0
     property int settling: 0

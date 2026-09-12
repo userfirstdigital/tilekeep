@@ -43,6 +43,7 @@ pub fn run(options: Options) -> Result<(), String> {
     STOP.store(false, Ordering::Relaxed);
     let source = include_str!("kwin.qml")
         .replace("__TILEKEEP_GAP__", &options.gap.to_string())
+        .replace("__TILEKEEP_FLOAT_SECONDARY_WINDOWS__", if options.float_secondary_windows { "true" } else { "false" })
         .replace("__TILEKEEP_DRY_RUN__", if options.dry_run { "true" } else { "false" });
     // KWin caches QML by URL even after unloading it. A nonce also handles PID
     // reuse, and create_new prevents following an attacker-supplied /tmp link.
@@ -125,6 +126,8 @@ pub fn run(options: Options) -> Result<(), String> {
                 C::Unstack => "TilekeepUnstack".into(),
                 C::Compact => "TilekeepCompact".into(),
                 C::Gap(g) => format!("TilekeepSetGap{g}"),
+                C::FloatSecondaryWindows(true) => "TilekeepFloatSecondaryOn".into(),
+                C::FloatSecondaryWindows(false) => "TilekeepFloatSecondaryOff".into(),
                 C::SaveSnapshot => "TilekeepSaveSnapshot".into(),
                 C::LoadSnapshot(_) => "TilekeepLoadSnapshot".into(),
                 C::Quit => {

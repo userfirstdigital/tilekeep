@@ -24,7 +24,8 @@ if(!process.argv.includes('--inside')) {
     const logFile=path.join(rootDir,'kwin.log'),fd=fs.openSync(logFile,'wx',0o600);
     // Qt caches directory entries when resolving local QML component names.
     for(let i=0;i<40;i++)fs.writeFileSync(path.join(rootDir,'TKISOLATED'+i+'.qml'),'');
-    const modifierTest=process.argv.includes('--control-drag');
+        const modifierTest=process.argv.includes('--control-drag');
+        const secondaryTest=process.argv.includes('--secondary-window');
     const env={...process.env,QT_QPA_PLATFORM:'offscreen'};
     const mesa='/usr/share/glvnd/egl_vendor.d/50_mesa.json';if(fs.existsSync(mesa))env.__EGL_VENDOR_LIBRARY_FILENAMES=mesa;
     if(modifierTest){delete env.__EGL_VENDOR_LIBRARY_FILENAMES;env.KWIN_COMPOSE='O2';}
@@ -55,7 +56,13 @@ if(!process.argv.includes('--inside')) {
         fs.writeFileSync(fixture,`import QtQuick
 import QtQuick.Window
 Window {visible:true;width:300;height:300;minimumWidth:100;minimumHeight:100;title:'Tilekeep isolated A'
- Window {visible:true;width:300;height:300;minimumWidth:100;minimumHeight:100;title:'Tilekeep isolated B';transientParent:null}}
+ Window {visible:true;width:300;height:300;minimumWidth:100;minimumHeight:100;title:'Tilekeep isolated B';transientParent:null}
+ ${secondaryTest?`property var secondaryOne: null
+ property var secondaryTwo: null
+ Component {id: secondaryOneComponent;Window {visible:true;width:420;height:320;minimumWidth:100;minimumHeight:100;title:'Tilekeep isolated Compose';transientParent:null}}
+ Component {id: secondaryTwoComponent;Window {visible:true;width:360;height:280;minimumWidth:100;minimumHeight:100;title:'Tilekeep isolated Second';transientParent:null}}
+ Timer {interval:4000;running:true;onTriggered:secondaryOne=secondaryOneComponent.createObject(null)}
+ Timer {interval:6500;running:true;onTriggered:secondaryTwo=secondaryTwoComponent.createObject(null)}`:''}}
 `);
         app=spawn('qml6',[fixture],{env:{...process.env,QT_QPA_PLATFORM:'wayland'},stdio:['ignore',fd,fd]});
         await wait(500);
@@ -63,7 +70,55 @@ Window {visible:true;width:300;height:300;minimumWidth:100;minimumHeight:100;tit
             await require('./plasma-drag-isolated.cjs')({rootDir,kwin,app,dbus,logFile,fd,baseline:process.argv.includes('--baseline')});
             return;
         }
-        const original=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
+        const original=fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8').replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_FLOAT_SECONDARY_WINDOWS__','true').replace('__TILEKEEP_DRY_RUN__','false');
+        if(secondaryTest) {
+            const marker='TKSECONDARY',file=path.join(rootDir,marker+'.qml');
+            const test=`
+ property int secondaryPhase: 0
+ property int secondaryTicks: 0
+ property var secondaryA: null
+ property var secondaryB: null
+ property var secondaryC: null
+ property var secondaryABefore: null
+ property var secondaryBBefore: null
+ property var secondaryCBefore: null
+ function secondaryCheck(ok,message){if(!ok)throw Error(message);}
+ Timer {interval:100;running:true;repeat:true;onTriggered:{try{
+   if(++root.secondaryTicks>100)throw Error('secondary-window timeout '+root.secondaryPhase);
+   if(root.currentPlacement||root.placementQueue.length)return;
+   if(root.secondaryPhase===0){
+     root.secondaryA=Workspace.stackingOrder.find(w=>String(w.caption)==='Tilekeep isolated A');
+     if(!root.secondaryA||!root.slotOf(root.secondaryA))return;
+     root.secondaryCheck(!root.floating.has(root.secondaryA),'existing windows were reclassified');
+     root.secondaryABefore=root.windowRect(root.secondaryA);root.secondaryPhase=1;return;
+   }
+   if(root.secondaryPhase===1){
+     root.secondaryC=Workspace.stackingOrder.find(w=>String(w.caption)==='Tilekeep isolated Compose');if(!root.secondaryC)return;
+     root.secondaryCheck(root.floating.has(root.secondaryC)&&!root.slotOf(root.secondaryC),'new same-app compose window was tiled');
+     root.secondaryCheck(root.geometryMatches(root.windowRect(root.secondaryA),root.secondaryABefore,1),'floating compose changed existing tiles');
+     root.secondaryCBefore=root.windowRect(root.secondaryC);root.floatSecondaryWindows=false;root.secondaryPhase=2;return;
+   }
+   const d=Workspace.stackingOrder.find(w=>String(w.caption)==='Tilekeep isolated Second');if(!d)return;
+   root.secondaryCheck(!root.floating.has(d)&&!!root.slotOf(d),'disabled preference still floated a new same-app window');
+   root.secondaryCheck(root.floating.has(root.secondaryC)&&root.geometryMatches(root.windowRect(root.secondaryC),root.secondaryCBefore,1),'later tiling disturbed the floating compose window');
+   console.log('${marker}','PASS');this.stop();
+ }catch(e){console.log('${marker}','FAIL',String(e));this.stop();}}}
+ `;
+            fs.writeFileSync(file,original.slice(0,original.lastIndexOf('}'))+test+'}\n');
+            loadScript(dbus,file,'tilekeep-secondary-test');
+            try {
+                let passed=false;
+                for(let i=0;i<110;i++){
+                    await wait(100);if(kwin.exitCode!==null||app.exitCode!==null)throw Error('Private compositor or clients exited');
+                    const log=fs.readFileSync(logFile,'utf8');
+                    if(log.includes(marker+' FAIL'))throw Error('Private secondary-window check failed');
+                    if(log.includes(marker+' PASS')){passed=true;break;}
+                }
+                if(!passed)throw Error('Private secondary-window check timed out');
+                console.log('PASS existing windows stayed tiled; new same-app window floated by default and the live preference disabled the rule');
+            } finally {dbus('/Scripting','org.kde.kwin.Scripting.unloadScript','tilekeep-secondary-test');}
+            return;
+        }
         for(let cycle=0;cycle<40;cycle++) {
             if(kwin.exitCode!==null||app.exitCode!==null)throw Error('Isolated compositor or clients exited');
             const marker='TKISOLATED'+cycle,file=path.join(rootDir,marker+'.qml');

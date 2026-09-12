@@ -127,6 +127,11 @@ impl ksni::Tray for LinuxMenu {
                 ..Default::default()
             }
             .into(),
+            Self::check(
+                "Float new windows from existing apps",
+                s.settings.float_secondary_windows,
+                Action::FloatSecondaryWindows,
+            ),
             MenuItem::Separator,
             Self::item("Save snapshot now", Action::SaveSnapshot),
             SubMenu {
@@ -263,6 +268,11 @@ impl PlatformTray {
             ("Retile".into(), Some(Action::Retile), None),
             ("Unstack active window".into(), Some(Action::Unstack), None),
             ("Compact this monitor".into(), Some(Action::Compact), None),
+            (
+                "Float new windows from existing apps".into(),
+                Some(Action::FloatSecondaryWindows),
+                Some(s.settings.float_secondary_windows),
+            ),
             ("Start with Windows".into(), Some(Action::Autostart), Some(s.autostart)),
             ("Silent updates (next launch)".into(), Some(Action::AutomaticUpdates), Some(s.settings.automatic_updates)),
             ("Check for updates".into(), Some(Action::CheckUpdates), None),

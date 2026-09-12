@@ -249,6 +249,19 @@ impl Desktop {
         true
     }
 
+    /// Remember a newly observed window without assigning it a tile. Platform
+    /// integrations use this for secondary same-app windows that should keep
+    /// the native size and position chosen by their application.
+    pub fn window_appeared_floating(&mut self, w: WindowId, identity: Option<AppIdentity>) -> bool {
+        if self.contains(w) || self.floating.contains(&w) {
+            return false;
+        }
+        if let Some(id) = identity {
+            self.identities.insert(w, id);
+        }
+        self.floating.insert(w)
+    }
+
     /// The window is gone: its slot stays empty, tagged with the app that just left it.
     /// Returns false if it was not tracked.
     pub fn window_vanished(&mut self, w: WindowId) -> bool {
@@ -1131,6 +1144,20 @@ mod tests {
         assert_eq!(d.focused(), Some(B));
         assert!(d.window_vanished(B));
         assert_eq!(d.focused(), None);
+    }
+
+    #[test]
+    fn newly_appeared_secondary_window_can_start_floating_without_changing_the_tree() {
+        let mut d = two_up();
+        let before = d.monitors()[0].tree.clone();
+        let identity = AppIdentity("mail".into());
+        assert!(d.window_appeared_floating(C, Some(identity.clone())));
+        assert!(d.is_floating(C));
+        assert!(!d.contains(C));
+        assert_eq!(d.monitors()[0].tree, before);
+        assert!(!d.window_appeared(C, M1, Some(identity)), "floating default cannot be auto-tiled later");
+        assert!(d.window_vanished(C));
+        assert!(!d.is_floating(C));
     }
 
     #[test]

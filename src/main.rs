@@ -87,6 +87,8 @@ fn main() {
         }
     }
     let gap = controller.as_ref().map(|c| c.state().settings.gap).unwrap_or_else(|| gap_arg(&args));
+    let float_secondary_windows =
+        controller.as_ref().map(|c| c.state().settings.float_secondary_windows).unwrap_or(true);
     if let Some(c) = controller {
         if !args.iter().any(|a| a == "--no-tray") {
             if let Err(e) = windowmanager::tray::start(c.clone()) {
@@ -96,7 +98,7 @@ fn main() {
         windowmanager::updater::schedule(c);
     }
     log::info!("wm {} starting (dry_run={dry_run}, gap={gap})", env!("CARGO_PKG_VERSION"));
-    if let Err(e) = run(dry_run, gap) {
+    if let Err(e) = run(dry_run, gap, float_secondary_windows) {
         eprintln!("{e}");
         std::process::exit(1);
     }
@@ -150,17 +152,17 @@ fn gap_arg(args: &[String]) -> i32 {
 }
 
 #[cfg(windows)]
-fn run(dry_run: bool, gap: i32) -> Result<(), String> {
-    windowmanager::app::run(windowmanager::app::Options { dry_run, gap })
+fn run(dry_run: bool, gap: i32, float_secondary_windows: bool) -> Result<(), String> {
+    windowmanager::app::run(windowmanager::app::Options { dry_run, gap, float_secondary_windows })
 }
 
 #[cfg(target_os = "linux")]
-fn run(dry_run: bool, gap: i32) -> Result<(), String> {
-    windowmanager::linux::run(windowmanager::linux::Options { dry_run, gap })
+fn run(dry_run: bool, gap: i32, float_secondary_windows: bool) -> Result<(), String> {
+    windowmanager::linux::run(windowmanager::linux::Options { dry_run, gap, float_secondary_windows })
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn run(_dry_run: bool, _gap: i32) -> Result<(), String> {
+fn run(_dry_run: bool, _gap: i32, _float_secondary_windows: bool) -> Result<(), String> {
     Err("wm supports Windows and Linux/X11".into())
 }
 

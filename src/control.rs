@@ -13,6 +13,7 @@ pub enum Action {
     Retile,
     Compact,
     Gap(i32),
+    FloatSecondaryWindows,
     Autostart,
     AutomaticUpdates,
     CheckUpdates,
@@ -31,6 +32,7 @@ pub enum Command {
     Retile,
     Compact,
     Gap(i32),
+    FloatSecondaryWindows(bool),
     SaveSnapshot,
     LoadSnapshot(String),
     Quit,
@@ -168,6 +170,13 @@ impl Controller {
                 Some(Command::Gap(g))
             }
             Action::Gap(_) => return Err("Gap must be between 0 and 64".into()),
+            Action::FloatSecondaryWindows => {
+                let mut next = state.settings.clone();
+                next.float_secondary_windows = !next.float_secondary_windows;
+                crate::settings::save(&self.path, &next)?;
+                state.settings = next;
+                Some(Command::FloatSecondaryWindows(state.settings.float_secondary_windows))
+            }
             Action::Autostart => {
                 let next = !state.autostart;
                 crate::autostart::set(next, &self.exe)?;

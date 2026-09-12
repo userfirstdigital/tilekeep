@@ -58,7 +58,7 @@ module.exports=async({rootDir,kwin,app,dbus,logFile,fd,baseline})=>{
             dbus('/Scripting','org.kde.kwin.Scripting.unloadScript','tilekeep-resize-marker-probe');probeLoaded=false;
         }
         let source=baseline?execFileSync('git',['show','v0.2.6:src/linux/kwin.qml'],{cwd:path.join(__dirname,'..'),encoding:'utf8'}):fs.readFileSync(path.join(__dirname,'../src/linux/kwin.qml'),'utf8');
-        source=source.replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_DRY_RUN__','false');
+        source=source.replace('__TILEKEEP_GAP__','1').replace('__TILEKEEP_FLOAT_SECONDARY_WINDOWS__','true').replace('__TILEKEEP_DRY_RUN__','false');
         const test=`
  property int dragCase: 0
  property int dragPhase: 0
