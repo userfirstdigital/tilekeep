@@ -706,7 +706,7 @@ impl App {
                     app: self.x.identity(w).map(|a| a.0).unwrap_or_default(),
                     title: self.x.title(w).unwrap_or_default(),
                     pid,
-                    executable: std::fs::read_link(format!("/proc/{pid}/exe")).ok(),
+                    executable: crate::snapshots::recorded_executable(pid),
                     rect: self.x.rect(w)?,
                     floating: self.desktop.is_floating(id),
                 })

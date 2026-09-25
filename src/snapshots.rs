@@ -1,4 +1,5 @@
-//! Portable, bounded snapshot data. Launch only recorded executables, never shell commands.
+//! Portable, bounded snapshot data. Launch installed desktop entries or recorded executables,
+//! never through a shell.
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -191,7 +192,7 @@ pub fn save(snapshot: Snapshot) -> Result<String, String> {
     let snapshot = {
         let mut snapshot = snapshot;
         for w in &mut snapshot.windows {
-            w.executable = std::fs::read_link(format!("/proc/{}/exe", w.pid)).ok();
+            w.executable = recorded_executable(w.pid);
         }
         snapshot
     };
@@ -236,21 +237,173 @@ pub fn launch_missing(snapshot: &Snapshot, live: &[AppWindow]) -> Vec<String> {
             continue;
         }
         let result = (|| {
-            let exe = w.executable.as_ref().ok_or("No executable recorded")?;
+            // The desktop entry keeps the arguments that distinguish app instances and works for
+            // AppImages and wrapper-launched apps whose running executable is not relaunchable.
+            #[cfg(target_os = "linux")]
+            if let Some(entry) = desktop_entry_in(&application_dirs(), &w.app) {
+                return spawn(entry.command());
+            }
+            let exe = live_path(w.executable.as_ref().ok_or("No executable recorded")?);
             if !exe.is_absolute() || !exe.is_file() {
                 return Err("Recorded executable is missing".to_string());
             }
-            if std::env::current_exe().ok().as_ref() == Some(exe) {
+            if std::env::current_exe().ok() == Some(exe.clone()) {
                 return Err("Will not launch a second Tilekeep".into());
             }
-            std::process::Command::new(exe).spawn().map_err(|e| e.to_string())?;
-            Ok(())
+            spawn(std::process::Command::new(exe))
         })();
         if let Err(e) = result {
             errors.push(format!("{}: {e}", w.app));
         }
     }
     errors
+}
+fn spawn(mut command: std::process::Command) -> Result<(), String> {
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    // Reap launchers that hand off to a running instance and exit.
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+/// A binary replaced by a package update while running reads back as "<path> (deleted)".
+fn live_path(path: &std::path::Path) -> PathBuf {
+    path.to_str()
+        .and_then(|p| p.strip_suffix(" (deleted)"))
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+#[cfg(target_os = "linux")]
+pub(crate) fn recorded_executable(pid: u32) -> Option<PathBuf> {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    // An AppImage runs from a temporary mount (APPDIR); record the image itself. Children an
+    // AppImage starts inherit its environment but do not run from its mount.
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+    let var = |name: &[u8]| {
+        environ.split(|b| *b == 0).find_map(|v| v.strip_prefix(name)).map(|v| PathBuf::from(OsStr::from_bytes(v)))
+    };
+    if let (Some(image), Some(dir)) = (var(b"APPIMAGE="), var(b"APPDIR=")) {
+        if exe.starts_with(&dir) && image.is_file() {
+            return Some(image);
+        }
+    }
+    Some(live_path(&exe))
+}
+#[cfg(target_os = "linux")]
+fn application_dirs() -> Vec<PathBuf> {
+    let env = |name, default: &str| std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or(default.into());
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut dirs = vec![PathBuf::from(env("XDG_DATA_HOME", &format!("{home}/.local/share")))];
+    dirs.extend(env("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(':').map(PathBuf::from));
+    dirs.into_iter().filter(|d| d.is_absolute()).map(|d| d.join("applications")).collect()
+}
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct DesktopEntry {
+    args: Vec<String>,
+    path: Option<PathBuf>,
+}
+#[cfg(target_os = "linux")]
+impl DesktopEntry {
+    fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.args[0]);
+        command.args(&self.args[1..]);
+        if let Some(dir) = self.path.as_ref().filter(|d| d.is_dir()) {
+            command.current_dir(dir);
+        }
+        command
+    }
+}
+/// Finds the entry KWin reported as the window's desktop file name (case-insensitively), or one
+/// whose StartupWMClass is the window class. Earlier directories take precedence.
+#[cfg(target_os = "linux")]
+fn desktop_entry_in(dirs: &[PathBuf], app: &str) -> Option<DesktopEntry> {
+    let app = app.to_lowercase();
+    let mut by_class = None;
+    let mut seen = HashSet::new();
+    for dir in dirs {
+        let Ok(files) = std::fs::read_dir(dir) else { continue };
+        let mut files: Vec<_> = files.filter_map(|f| f.ok()).map(|f| f.path()).collect();
+        files.sort();
+        for file in files {
+            let Some(id) = file.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".desktop")) else {
+                continue;
+            };
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+            let Some((entry, class)) = std::fs::read_to_string(&file).ok().and_then(|t| parse_desktop_entry(&t)) else {
+                continue;
+            };
+            if id.to_lowercase() == app {
+                return Some(entry);
+            }
+            if by_class.is_none() && class.is_some_and(|c| c.to_lowercase() == app) {
+                by_class = Some(entry);
+            }
+        }
+    }
+    by_class
+}
+#[cfg(target_os = "linux")]
+fn parse_desktop_entry(text: &str) -> Option<(DesktopEntry, Option<String>)> {
+    let mut group = false;
+    let (mut exec, mut path, mut class, mut hidden) = (None, None, None, false);
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            group = line == "[Desktop Entry]";
+        } else if let Some((key, value)) = line.split_once('=').filter(|_| group) {
+            match key.trim() {
+                "Exec" => exec = Some(value.trim()),
+                "Path" => path = Some(PathBuf::from(value.trim())),
+                "StartupWMClass" => class = Some(value.trim().to_string()),
+                "Hidden" => hidden = value.trim() == "true",
+                _ => {}
+            }
+        }
+    }
+    let args = exec_args(exec?)?;
+    (!hidden && !args.is_empty()).then_some((DesktopEntry { args, path }, class))
+}
+/// Splits a desktop entry Exec value into arguments and drops field codes such as %U, since
+/// nothing is being opened.
+#[cfg(target_os = "linux")]
+fn exec_args(exec: &str) -> Option<Vec<String>> {
+    let mut unescaped = String::new();
+    let mut chars = exec.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            unescaped.push(c);
+            continue;
+        }
+        match chars.next()? {
+            's' => unescaped.push(' '),
+            'n' => unescaped.push('\n'),
+            't' => unescaped.push('\t'),
+            'r' => unescaped.push('\r'),
+            '\\' => unescaped.push('\\'),
+            other => unescaped.extend(['\\', other]),
+        }
+    }
+    let (mut args, mut arg, mut quoted) = (Vec::new(), None::<String>, false);
+    let mut chars = unescaped.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                arg.get_or_insert_with(String::new);
+            }
+            '\\' if quoted => arg.get_or_insert_with(String::new).push(chars.next()?),
+            '%' if !quoted => {
+                if chars.next()? == '%' {
+                    arg.get_or_insert_with(String::new).push('%');
+                }
+            }
+            c if c.is_whitespace() && !quoted => args.extend(arg.take()),
+            c => arg.get_or_insert_with(String::new).push(c),
+        }
+    }
+    (!quoted).then(|| args.into_iter().chain(arg).collect())
 }
 pub struct Restore {
     pub snapshot: Snapshot,
@@ -534,6 +687,58 @@ mod tests {
         let encoded = serde_json::to_string(&node).unwrap();
         let restored: Node = serde_json::from_str(&encoded).unwrap();
         assert!(matches!(restored, Node::Split { preserve_space: true, .. }));
+    }
+    #[test]
+    fn replaced_binaries_resolve_to_the_updated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("app");
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(live_path(&dir.path().join("app (deleted)")), exe);
+        let gone = dir.path().join("gone (deleted)");
+        assert_eq!(live_path(&gone), gone);
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_values_split_like_the_desktop_entry_spec() {
+        let args = |s| exec_args(s).unwrap();
+        assert_eq!(args("dolphin %u"), ["dolphin"]);
+        assert_eq!(
+            args(r#"/opt/Teams.AppImage --class=teams "--appTitle=Teams – A" %U"#),
+            ["/opt/Teams.AppImage", "--class=teams", "--appTitle=Teams – A"]
+        );
+        assert_eq!(args(r#""/a b/app" "say \\"hi\\"" 100%% %%f"#), ["/a b/app", r#"say "hi""#, "100%", "%f"]);
+        assert_eq!(args(r#""app\sname" x"#), ["app name", "x"]);
+        assert!(exec_args(r#"app "open"#).is_none());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn desktop_entries_match_by_id_or_window_class_with_user_entries_first() {
+        let (user, system) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let write = |dir: &tempfile::TempDir, name: &str, body: &str| {
+            std::fs::write(
+                dir.path().join(name),
+                format!("[Desktop Entry]\n{body}\n[Desktop Action new]\nExec=wrong\n"),
+            )
+            .unwrap()
+        };
+        write(&system, "org.gnome.Evolution.desktop", "Exec=evolution");
+        write(&user, "chromium.desktop", "Exec=/usr/bin/chromium --load-extension=/x %U\nPath=/tmp");
+        write(&system, "chromium.desktop", "Exec=/usr/bin/chromium %U");
+        write(&system, "office-editors.desktop", "Exec=/opt/office\nStartupWMClass=Office");
+        write(&user, "hidden.desktop", "Exec=hidden\nHidden=true");
+        let dirs = [user.path().to_path_buf(), system.path().to_path_buf()];
+        let find = |app| desktop_entry_in(&dirs, app).map(|e| e.args);
+        assert_eq!(find("org.gnome.evolution").unwrap(), ["evolution"]);
+        assert_eq!(find("chromium").unwrap(), ["/usr/bin/chromium", "--load-extension=/x"]);
+        assert_eq!(desktop_entry_in(&dirs, "chromium").unwrap().path, Some(PathBuf::from("/tmp")));
+        assert_eq!(find("office").unwrap(), ["/opt/office"]);
+        assert!(find("hidden").is_none());
+        assert!(find("missing").is_none());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn own_process_executable_is_recorded() {
+        assert_eq!(recorded_executable(std::process::id()), std::env::current_exe().ok());
     }
     #[test]
     fn matching_does_not_reuse_a_window() {

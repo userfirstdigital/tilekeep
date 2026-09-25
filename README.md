@@ -39,8 +39,11 @@ Renaming preserves the layout and startup selection. Delete asks for confirmatio
 startup loading if needed, and moves the saved file to `snapshots/deleted` for recovery;
 it never closes applications. Linux name/confirmation dialogs use `kdialog` (Plasma) or `zenity`.
 Document contents/browser tabs are the application's responsibility, not included in snapshots.
-Missing apps are relaunched from their saved executable, without replaying command-line arguments.
-Apps that require a launcher or do not reopen multiple windows themselves may need manual reopening.
+On Linux, missing apps are relaunched from their installed `.desktop` entry (matched by the window's
+app ID or `StartupWMClass`), including the entry's arguments; otherwise from their saved executable,
+without command-line arguments. Snapshots record an AppImage's image file and survive package updates
+that replace a running binary. Each app is launched once, so apps that do not reopen multiple windows
+themselves may need manual reopening.
 
 **Updates:** signed releases download silently in the background and install on the next launch.
 Development builds without a release verification key clearly show that updates are unavailable.
