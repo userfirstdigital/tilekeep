@@ -46,19 +46,23 @@ pub fn run(options: Options) -> Result<(), String> {
         .replace("__TILEKEEP_FLOAT_SECONDARY_WINDOWS__", if options.float_secondary_windows { "true" } else { "false" })
         .replace("__TILEKEEP_DRY_RUN__", if options.dry_run { "true" } else { "false" });
     // KWin caches QML by URL even after unloading it. A nonce also handles PID
-    // reuse, and create_new prevents following an attacker-supplied /tmp link.
+    // reuse. Qt also caches directory listings for its file-name case check, so
+    // a new file in an already-listed directory such as /tmp fails to load with
+    // "File name case mismatch"; each run gets a fresh private directory. KWin
+    // reads the file asynchronously, so it is kept until Tilekeep stops.
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
-    let path = std::env::temp_dir().join(format!("tilekeep-{}-{nonce}.qml", std::process::id()));
+    let script_dir = tempfile::Builder::new()
+        .prefix(&format!("tilekeep-{}-{nonce}-", std::process::id()))
+        .tempdir_in(&lock_dir)
+        .map_err(|e| format!("could not create the KWin script directory: {e}"))?;
+    let path = script_dir.path().join("tilekeep.qml");
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&path)
         .map_err(|e| format!("could not create {}: {e}", path.display()))?;
-    if let Err(e) = file.write_all(source.as_bytes()) {
-        let _ = std::fs::remove_file(&path);
-        return Err(format!("could not write {}: {e}", path.display()));
-    }
+    file.write_all(source.as_bytes()).map_err(|e| format!("could not write {}: {e}", path.display()))?;
     drop(file);
 
     let mut reservations = Vec::new();
@@ -96,7 +100,6 @@ pub fn run(options: Options) -> Result<(), String> {
     for name in reservations {
         let _ = scripting(&["unloadScript", &name]);
     }
-    let _ = std::fs::remove_file(&path);
     if let Err(e) = started {
         let _ = scripting(&["unloadScript", PLUGIN]);
         if modifier_effect {
@@ -165,6 +168,7 @@ pub fn run(options: Options) -> Result<(), String> {
     if modifier_effect {
         unload_modifier_effect();
     }
+    drop(script_dir);
     Ok(())
 }
 
